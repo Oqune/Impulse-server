@@ -4,8 +4,10 @@ use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use bcrypt::{hash, verify, DEFAULT_COST};
 
 const SERVER_ADDRESS: &str = "192.168.1.50:8080";
+const SECRET_PASSWORD: &str = "your_secure_password_here";
 
 // Типы для хранения состояния
 type ClientMap = Arc<Mutex<HashMap<usize, tokio::sync::mpsc::UnboundedSender<Message>>>>;
@@ -15,6 +17,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(SERVER_ADDRESS).await?;
     println!("WebSocket сервер запущен на {}", SERVER_ADDRESS);
 
+    // Хешируем пароль при запуске сервера
+    let hashed_password = hash(SECRET_PASSWORD, DEFAULT_COST)?;
+    println!("Сервер готов принимать соединения с аутентификацией");
+
     let clients: ClientMap = Arc::new(Mutex::new(HashMap::new()));
     let client_id_counter = Arc::new(Mutex::new(0usize));
 
@@ -23,6 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let clients = clients.clone();
         let client_id_counter = client_id_counter.clone();
+        let hashed_password = hashed_password.clone();
 
         tokio::spawn(async move {
             let client_id = {
@@ -32,8 +39,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             if let Ok(ws_stream) = tokio_tungstenite::accept_async(stream).await {
-                let (ws_tx, mut ws_rx) = ws_stream.split();
+                let (mut ws_tx, mut ws_rx) = ws_stream.split();
                 println!("WebSocket соединение установлено для клиента {}", client_id);
+
+                // Ожидаем сообщение с паролем от клиента
+                let auth_message = ws_rx.next().await;
+                let authenticated = match auth_message {
+                    Some(Ok(Message::Text(text))) => {
+                        verify(&text, &hashed_password).unwrap_or_else(|_| false)
+                    },
+                    _ => false,
+                };
+
+                if !authenticated {
+                    println!("Клиент {} не прошел аутентификацию", client_id);
+                    let _ = ws_tx.send(Message::Close(None)).await;
+                    return;
+                }
+
+                // Отправляем сигнал об успешной аутентификации
+                if let Err(e) = ws_tx.send(Message::Text("AUTH_SUCCESS".to_string().into())).await {
+                    eprintln!("Ошибка отправки сигнала аутентификации клиенту {}: {}", client_id, e);
+                    return;
+                }
+                println!("Клиент {} успешно аутентифицирован", client_id);
 
                 // Создаем канал для отправки сообщений этому клиенту
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
