@@ -6,7 +6,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use bcrypt::{hash, verify, DEFAULT_COST};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 const SERVER_ADDRESS: &str = "192.168.1.50:8080";
 const SECRET_PASSWORD: &str = "your_secure_password_here";
@@ -36,8 +35,6 @@ struct AuthRequest {
     name: String,
     #[serde(default)]
     password: Option<String>,
-    #[serde(default)]
-    public_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,10 +77,7 @@ struct InfoMessage {
 #[derive(Debug)]
 struct ClientInfo {
     id: u32,
-    name: String,
     sender: tokio::sync::mpsc::UnboundedSender<Message>,
-    public_key: Option<String>,
-    user_id: Option<String>,
 }
 
 type ClientsMap = Arc<Mutex<HashMap<u32, ClientInfo>>>;
@@ -121,14 +115,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Ожидаем сообщение аутентификации от клиента
                 let auth_message = ws_rx.next().await;
                 let mut client_name = "Клиент".to_string();
-                let mut client_public_key = None;
-                let mut client_user_id = None;
                 let authenticated = match auth_message {
                     Some(Ok(Message::Text(text))) => {
-                        // Пытаемся сначала распарсить как унифицированное сообщение
                         if let Ok(unified_msg) = serde_json::from_str::<UnifiedMessage>(&text) {
                             if unified_msg.msg_type == MessageType::Technical {
-                                if let Ok(auth_req) = serde_json::from_value::<AuthRequest>(unified_msg.payload.clone()) {
+                                if let Ok(auth_req) = serde_json::from_value::<AuthRequest>(unified_msg.payload) {
                                     let password_verified = if let Some(pwd) = &auth_req.password {
                                         verify(pwd, &hashed_password).unwrap_or(false)
                                     } else {
@@ -137,7 +128,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                     if password_verified {
                                         client_name = auth_req.name.clone();
-                                        client_public_key = auth_req.public_key.clone();
                                     }
 
                                     password_verified
@@ -148,23 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 false
                             }
                         } else {
-                            // Если не удалось распарсить как унифицированное, пробуем как простой AuthRequest
-                            if let Ok(auth_req) = serde_json::from_str::<AuthRequest>(&text) {
-                                let password_verified = if let Some(pwd) = &auth_req.password {
-                                    verify(pwd, &hashed_password).unwrap_or(false)
-                                } else {
-                                    true
-                                };
-
-                                if password_verified {
-                                    client_name = auth_req.name.clone();
-                                    client_public_key = auth_req.public_key.clone();
-                                }
-
-                                password_verified
-                            } else {
-                                false
-                            }
+                            false
                         }
                     }
                     _ => false,
@@ -199,10 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Добавляем клиента в карту
                 let client_info = ClientInfo {
                     id: client_id,
-                    name: client_name.clone(),
                     sender: tx.clone(),
-                    public_key: client_public_key.clone(),
-                    user_id: client_user_id.clone(),
                 };
 
                 {
@@ -240,12 +211,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     while let Some(message) = ws_rx.next().await {
                         match message {
                             Ok(Message::Text(text)) => {
-                                // Пытаемся распарсить как унифицированное сообщение
+                                // Пытаемся распарить как унифицированное сообщение
                                 if let Ok(unified_msg) = serde_json::from_str::<UnifiedMessage>(&text) {
                                     match unified_msg.msg_type {
                                         MessageType::Content => {
                                             // Обрабатываем контентные сообщения от клиента
-                                            if let Ok(client_content_msg) = serde_json::from_value::<ClientContentMessage>(unified_msg.payload.clone()) {
+                                            if let Ok(client_content_msg) = serde_json::from_value::<ClientContentMessage>(unified_msg.payload) {
                                                 println!("Получено сообщение от клиента {}: {}", client_content_msg.sender_name, client_content_msg.content);
 
                                                 // Создаем серверное контентное сообщение для рассылки
@@ -279,46 +250,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 } else {
-                                    // Пытаемся распарсить как простое JSON сообщение
-                                    if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                                        if let Some(msg_type) = value.get("type").and_then(|v| v.as_str()) {
-                                            match msg_type {
-                                                "content" => {
-                                                    if let Some(payload) = value.get("payload") {
-                                                        if let Ok(client_content_msg) = serde_json::from_value::<ClientContentMessage>(payload.clone()) {
-                                                            println!("Получено сообщение от клиента {}: {}", client_content_msg.sender_name, client_content_msg.content);
-
-                                                            // Создаем серверное контентное сообщение для рассылки
-                                                            let server_content_msg = ServerContentMessage {
-                                                                sender_id: client_id,
-                                                                sender_name: client_content_msg.sender_name.clone(),
-                                                                message: client_content_msg.content,
-                                                                encrypted: false,
-                                                            };
-
-                                                            let unified_server_msg = UnifiedMessage {
-                                                                msg_type: MessageType::Content,
-                                                                payload: serde_json::to_value(server_content_msg).unwrap(),
-                                                                timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-                                                            };
-
-                                                            broadcast_message(&clients_recv, &unified_server_msg, Some(client_id)).await;
-                                                        }
-                                                    }
-                                                }
-                                                "auth" | "authentication" => {
-                                                    println!("Получено повторное сообщение аутентификации от клиента {}", client_id);
-                                                }
-                                                _ => {
-                                                    eprintln!("Получено сообщение неизвестного типа '{}' от клиента {}: {}", msg_type, client_id, text);
-                                                }
-                                            }
-                                        } else {
-                                            eprintln!("Получено сообщение без типа от клиента {}: {}", client_id, text);
-                                        }
-                                    } else {
-                                        eprintln!("Получено сообщение неизвестного формата от клиента {}: {}", client_id, text);
-                                    }
+                                    eprintln!("Получено сообщение неизвестного формата от клиента {}: {}", client_id, text);
                                 }
                             }
                             Ok(Message::Close(_)) => {
