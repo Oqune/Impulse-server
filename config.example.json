@@ -1,0 +1,10 @@
+{
+  "server": {
+    "address": "0.0.0.0:8080",
+    "password": "your_secure_password_here"
+  },
+  "api": {
+    "enabled": true,
+    "address": "0.0.0.0:8081"
+  }
+}
