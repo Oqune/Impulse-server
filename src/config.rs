@@ -4,25 +4,21 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// CLI arguments for server configuration
 #[derive(Parser, Debug, Clone)]
 #[command(name = "impulse-server")]
 #[command(about = "WebSocket server with external configuration support")]
 pub struct CliArgs {
-    /// Server listen address
+
     #[arg(short, long, env = "SERVER_ADDRESS")]
     pub address: Option<String>,
 
-    /// Server password for authentication
     #[arg(short, long, env = "SERVER_PASSWORD")]
     pub password: Option<String>,
 
-    /// Path to configuration file
     #[arg(short, long, default_value = "config.json")]
     pub config: String,
 }
 
-/// Complete server configuration that can be loaded from multiple sources
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     pub server: ServerSettings,
@@ -30,14 +26,12 @@ pub struct AppConfig {
     pub api: ApiSettings,
 }
 
-/// WebSocket server settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerSettings {
     pub address: String,
     pub password: String,
 }
 
-/// HTTP API settings for runtime configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiSettings {
     pub enabled: bool,
@@ -62,25 +56,15 @@ impl Default for ApiSettings {
     }
 }
 
-/// Load configuration from multiple sources with priority:
-/// 1. CLI arguments (highest priority)
-/// 2. Environment variables
-/// 3. Configuration file
-/// 4. Default values (lowest priority)
 pub fn load_config(cli_args: &CliArgs) -> Result<AppConfig, ConfigError> {
-    // Load .env file if it exists
     let _ = dotenvy::dotenv();
 
-    // Build configuration
     let config_builder = Config::builder()
-        // Start with default values
         .set_default("server.address", "0.0.0.0:8080")?
         .set_default("server.password", "your_secure_password_here")?
         .set_default("api.enabled", true)?
         .set_default("api.address", "0.0.0.0:8081")?
-        // Load from configuration file
         .add_source(File::with_name(&cli_args.config).required(false))
-        // Load from environment variables (prefix: IMPULSE_)
         .add_source(
             Environment::with_prefix("IMPULSE")
                 .prefix_separator("_")
@@ -92,7 +76,6 @@ pub fn load_config(cli_args: &CliArgs) -> Result<AppConfig, ConfigError> {
 
     let mut app_config: AppConfig = config.try_deserialize()?;
 
-    // Override with CLI arguments if provided
     if let Some(ref addr) = cli_args.address {
         app_config.server.address = addr.clone();
     }
@@ -103,7 +86,6 @@ pub fn load_config(cli_args: &CliArgs) -> Result<AppConfig, ConfigError> {
     Ok(app_config)
 }
 
-/// Thread-safe configuration container for runtime updates
 #[derive(Clone)]
 pub struct SharedConfig {
     inner: Arc<RwLock<AppConfig>>,
