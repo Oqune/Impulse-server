@@ -10,21 +10,18 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::config::{AppConfig, ApiSettings, SharedConfig};
 
-/// Request body for updating server settings
 #[derive(Debug, Deserialize)]
 pub struct UpdateServerSettingsRequest {
     pub address: Option<String>,
     pub password: Option<String>,
 }
 
-/// Request body for updating API settings
 #[derive(Debug, Deserialize)]
 pub struct UpdateApiSettingsRequest {
     pub enabled: Option<bool>,
     pub address: Option<String>,
 }
 
-/// Response containing current configuration
 #[derive(Debug, Serialize)]
 pub struct ConfigResponse {
     pub server: ServerSettingsResponse,
@@ -61,7 +58,6 @@ impl From<AppConfig> for ConfigResponse {
     }
 }
 
-/// Create the configuration API router
 pub fn create_config_api_router(config: SharedConfig) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -78,13 +74,11 @@ pub fn create_config_api_router(config: SharedConfig) -> Router {
         .with_state(config)
 }
 
-/// Get full configuration
 async fn get_config(State(config): State<SharedConfig>) -> Json<ConfigResponse> {
     let app_config = config.get().await;
     Json(ConfigResponse::from(app_config))
 }
 
-/// Get server-specific configuration
 async fn get_server_config(State(config): State<SharedConfig>) -> Json<ServerSettingsResponse> {
     let app_config = config.get().await;
     let password = app_config.server.password.clone();
@@ -95,7 +89,6 @@ async fn get_server_config(State(config): State<SharedConfig>) -> Json<ServerSet
     })
 }
 
-/// Update server configuration
 async fn update_server_config(
     State(config): State<SharedConfig>,
     Json(request): Json<UpdateServerSettingsRequest>,
@@ -112,7 +105,6 @@ async fn update_server_config(
     (StatusCode::OK, Json(ConfigResponse::from(updated)))
 }
 
-/// Get API-specific configuration
 async fn get_api_config(State(config): State<SharedConfig>) -> Json<ApiSettingsResponse> {
     let app_config = config.get().await;
     Json(ApiSettingsResponse {
@@ -121,7 +113,6 @@ async fn get_api_config(State(config): State<SharedConfig>) -> Json<ApiSettingsR
     })
 }
 
-/// Update API configuration
 async fn update_api_config(
     State(config): State<SharedConfig>,
     Json(request): Json<UpdateApiSettingsRequest>,
@@ -139,7 +130,6 @@ async fn update_api_config(
     (StatusCode::OK, Json(ConfigResponse::from(updated)))
 }
 
-/// Update only the password
 async fn update_password(
     State(config): State<SharedConfig>,
     Json(request): Json<UpdateServerSettingsRequest>,
@@ -164,7 +154,6 @@ async fn update_password(
     }
 }
 
-/// Health check endpoint
 async fn health_check() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "healthy",
@@ -172,7 +161,6 @@ async fn health_check() -> Json<serde_json::Value> {
     }))
 }
 
-/// Start the configuration API server
 pub async fn start_config_api(config: SharedConfig, address: &str) -> Result<(), Box<dyn std::error::Error>> {
     let app = create_config_api_router(config);
     let listener = tokio::net::TcpListener::bind(address).await?;
