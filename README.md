@@ -1,5 +1,7 @@
 <div align="center">
 
+[🇺🇸 English](README.md) | [🇷🇺 Русский](README.ru.md) | [🇨🇳 中文](README.zh.md)
+
 ![logo](logo.png)
 
 [![Rust](https://img.shields.io/badge/Rust-1.70%2B-darkblue?logo=rust)](https://www.rust-lang.org)
