@@ -10,67 +10,72 @@ use tokio::sync::Mutex;
 use bcrypt::{hash, verify, DEFAULT_COST};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum MessageType {
-    Technical,
-    Informational,
-    Content,
-    System,
+const MAX_CLIENTS: usize = 100;
+const MAX_MSG_SIZE: usize = 4096;
+const CHANNEL_CAP: usize = 16;
+const MAX_NAME_LEN: usize = 32;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope {
+    pub v: u8,
+    pub ts: u64,
+    #[serde(flatten)]
+    pub body: MessageBody,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UnifiedMessage {
-    #[serde(rename = "type")]
-    pub msg_type: MessageType,
-    pub payload: serde_json::Value,
-    pub timestamp: u64,
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum MessageBody {
+    Auth(AuthRequest),
+    AuthResult(AuthResult),
+    Chat(ChatMessage),
+    Event(EventMessage),
+    Error(ErrorMessage),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthRequest {
     pub name: String,
-    #[serde(default)]
-    pub password: Option<String>,
+    pub password: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthResponse {
-    #[serde(rename = "type")]
-    pub msg_type: String,
+pub struct AuthResult {
     pub success: bool,
-    pub message: String,
     pub client_id: u32,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClientContentMessage {
-    pub sender_name: String,
+pub struct ChatMessage {
     pub content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerContentMessage {
-    pub sender_id: u32,
-    pub sender_name: String,
-    pub message: String,
-    #[serde(default)]
-    pub encrypted: bool,
+pub struct EventMessage {
+    #[serde(rename = "event")]
+    pub kind: EventKind,
+    pub user_id: u32,
+    pub user_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InfoMessage {
-    #[serde(rename = "type")]
-    pub msg_type: String,
-    pub event: String,
-    pub user_id: u32,
-    pub user_name: String,
+#[serde(rename_all = "lowercase")]
+pub enum EventKind {
+    Joined,
+    Left,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorMessage {
+    pub code: u16,
+    pub message: String,
 }
 
 #[derive(Debug)]
 pub struct ClientInfo {
     pub id: u32,
-    pub sender: tokio::sync::mpsc::UnboundedSender<Message>,
+    pub sender: tokio::sync::mpsc::Sender<Message>,
 }
 
 type ClientsMap = Arc<Mutex<HashMap<u32, ClientInfo>>>;
@@ -84,7 +89,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            address: "0.0.0.0:8080".to_string(),
+            address: "0.0.0.0:8087".to_string(),
             password: "your_secure_password_here".to_string(),
         }
     }
@@ -123,15 +128,15 @@ impl WsServer {
         self.clients.lock().await.keys().cloned().collect()
     }
 
-    pub async fn broadcast(&self, message: &UnifiedMessage) {
+    pub async fn broadcast(&self, message: &Envelope) {
         broadcast_message(&self.clients, message, None).await;
     }
 
-    pub async fn send_to_client(&self, client_id: u32, message: &UnifiedMessage) -> Result<(), String> {
+    pub async fn send_to_client(&self, client_id: u32, message: &Envelope) -> Result<(), String> {
         let clients_map = self.clients.lock().await;
         if let Some(client_info) = clients_map.get(&client_id) {
             if let Ok(json_msg) = serde_json::to_string(message) {
-                if let Err(e) = client_info.sender.send(Message::Text(json_msg.into())) {
+                if let Err(e) = client_info.sender.send(Message::Text(json_msg.into())).await {
                     return Err(format!("Failed to send to client {}: {}", client_id, e));
                 }
                 Ok(())
@@ -207,6 +212,39 @@ impl Default for WsServer {
     }
 }
 
+fn sanitize_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len().min(MAX_NAME_LEN));
+    for c in name.chars() {
+        if c.is_control() || c == '"' || c == '\\' {
+            continue;
+        }
+        if out.len() >= MAX_NAME_LEN {
+            break;
+        }
+        out.push(c);
+    }
+    if out.is_empty() {
+        "Anonymous".to_string()
+    } else {
+        out
+    }
+}
+
+fn make_envelope(body: MessageBody) -> Envelope {
+    Envelope {
+        v: 1,
+        ts: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
+        body,
+    }
+}
+
+async fn send_error(ws_tx: &mut (impl SinkExt<Message> + Unpin), code: u16, message: &str) {
+    let env = make_envelope(MessageBody::Error(ErrorMessage { code, message: message.to_string() }));
+    if let Ok(json) = serde_json::to_string(&env) {
+        let _ = ws_tx.send(Message::Text(json.into())).await;
+    }
+}
+
 async fn handle_client(
     stream: tokio::net::TcpStream,
     client_id_counter: Arc<Mutex<u32>>,
@@ -215,6 +253,9 @@ async fn handle_client(
 ) {
     let client_id = {
         let mut counter = client_id_counter.lock().await;
+        if *counter >= u32::MAX - 1 {
+            return;
+        }
         *counter += 1;
         *counter
     };
@@ -232,62 +273,66 @@ async fn handle_client(
     let auth_message = match ws_rx.next().await {
         Some(Ok(Message::Text(text))) => text,
         _ => {
-            crate::console::log(crate::console::LogLevel::Error, "WS", &format!("Auth failed: no message, client {}", client_id));
             let _ = ws_tx.send(Message::Close(None)).await;
             return;
         }
     };
 
-    let mut client_name = "Клиент".to_string();
-    let authenticated = match serde_json::from_str::<UnifiedMessage>(&auth_message) {
-        Ok(unified_msg) if unified_msg.msg_type == MessageType::Technical => {
-            match serde_json::from_value::<AuthRequest>(unified_msg.payload) {
-                Ok(auth_req) => {
-                    let password_verified = auth_req.password.as_deref().map_or(true, |pwd| verify(pwd, &hashed_password).unwrap_or(false));
-                    if password_verified {
-                        client_name = auth_req.name;
+    let mut client_name = "Anonymous".to_string();
+    let authenticated = match serde_json::from_str::<Envelope>(&auth_message) {
+        Ok(env) if env.v == 1 => match env.body {
+            MessageBody::Auth(req) => {
+                match verify(&req.password, &hashed_password) {
+                    Ok(valid) => {
+                        if valid {
+                            client_name = sanitize_name(&req.name);
+                        }
+                        valid
                     }
-                    password_verified
+                    Err(_) => false,
                 }
-                Err(_) => false,
             }
+            _ => false,
         }
         _ => false,
     };
 
     if !authenticated {
         let _ = ws_tx.send(Message::Close(None)).await;
-        crate::console::log(crate::console::LogLevel::Error, "WS", &format!("Auth failed: client {}", client_id));
+        crate::console::log(crate::console::LogLevel::Warning, "WS", &format!("Auth failed: client {}", client_id));
         return;
     }
 
-    let auth_response = AuthResponse {
-        msg_type: "auth_response".to_string(),
+    let auth_response = make_envelope(MessageBody::AuthResult(AuthResult {
         success: true,
-        message: "Аутентификация успешна".to_string(),
         client_id,
-    };
+        message: "Аутентификация успешна".to_string(),
+    }));
 
     if let Ok(json_msg) = serde_json::to_string(&auth_response) {
         let _ = ws_tx.send(Message::Text(json_msg.into())).await;
     }
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(CHANNEL_CAP);
 
     {
         let mut clients_map = clients.lock().await;
+        if clients_map.len() >= MAX_CLIENTS {
+            drop(clients_map);
+            send_error(&mut ws_tx, 429, "Server full").await;
+            crate::console::log(crate::console::LogLevel::Warning, "WS", &format!("Rejected: server full, client {}", client_id));
+            return;
+        }
         clients_map.insert(client_id, ClientInfo { id: client_id, sender: tx });
         crate::console::log(crate::console::LogLevel::Info, "WS", &format!("Client {} ({}) connected", client_id, client_name));
     }
 
-    let info_msg = InfoMessage {
-        msg_type: "info".to_string(),
-        event: "joined".to_string(),
+    let event = make_envelope(MessageBody::Event(EventMessage {
+        kind: EventKind::Joined,
         user_id: client_id,
         user_name: client_name.clone(),
-    };
-
-    if let Ok(json_msg) = serde_json::to_string(&info_msg) {
+    }));
+    if let Ok(json_msg) = serde_json::to_string(&event) {
         broadcast_raw_message(&clients, &json_msg, Some(client_id)).await;
     }
 
@@ -307,24 +352,27 @@ async fn handle_client(
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        match serde_json::from_str::<UnifiedMessage>(&text) {
-                            Ok(unified_msg) if unified_msg.msg_type == MessageType::Content => {
-                                if let Ok(cm) = serde_json::from_value::<ClientContentMessage>(unified_msg.payload) {
-                                    let server_msg = ServerContentMessage {
-                                        sender_id: client_id,
-                                        sender_name: cm.sender_name.clone(),
-                                        message: cm.content,
-                                        encrypted: false,
-                                    };
-                                    let unified = UnifiedMessage {
-                                        msg_type: MessageType::Content,
-                                        payload: serde_json::to_value(server_msg).unwrap(),
-                                        timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-                                    };
-                                    broadcast_message(&clients, &unified, Some(client_id)).await;
+                        if text.len() > MAX_MSG_SIZE {
+                            crate::console::log(crate::console::LogLevel::Warning, "WS", &format!("Message too large: client {}", client_id));
+                            continue;
+                        }
+                        match serde_json::from_str::<Envelope>(&text) {
+                            Ok(env) if env.v == 1 => match env.body {
+                                MessageBody::Chat(chat) => {
+                                    let server_msg = make_envelope(MessageBody::Chat(ChatMessage {
+                                        content: chat.content,
+                                    }));
+                                    broadcast_message(&clients, &server_msg, Some(client_id)).await;
                                 }
+                                MessageBody::Error(_) => {}
+                                _ => {}
+                            },
+                            Ok(_) => {
+                                crate::console::log(crate::console::LogLevel::Warning, "WS", &format!("Bad protocol version: client {}", client_id));
                             }
-                            _ => {}
+                            Err(_) => {
+                                crate::console::log(crate::console::LogLevel::Warning, "WS", &format!("Bad JSON: client {}", client_id));
+                            }
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
@@ -338,14 +386,12 @@ async fn handle_client(
         }
     }
 
-    let leave_msg = InfoMessage {
-        msg_type: "informational".to_string(),
-        event: "left".to_string(),
+    let leave = make_envelope(MessageBody::Event(EventMessage {
+        kind: EventKind::Left,
         user_id: client_id,
         user_name: client_name.clone(),
-    };
-
-    if let Ok(json_msg) = serde_json::to_string(&leave_msg) {
+    }));
+    if let Ok(json_msg) = serde_json::to_string(&leave) {
         broadcast_raw_message(&clients, &json_msg, Some(client_id)).await;
     }
 
@@ -356,7 +402,7 @@ async fn handle_client(
     }
 }
 
-async fn broadcast_message(clients: &ClientsMap, message: &UnifiedMessage, exclude_id: Option<u32>) {
+async fn broadcast_message(clients: &ClientsMap, message: &Envelope, exclude_id: Option<u32>) {
     if let Ok(json_msg) = serde_json::to_string(message) {
         broadcast_raw_message(clients, &json_msg, exclude_id).await;
     }
@@ -368,6 +414,6 @@ async fn broadcast_raw_message(clients: &ClientsMap, message: &str, exclude_id: 
         if let Some(exclude) = exclude_id && client_info.id == exclude {
             continue;
         }
-        let _ = client_info.sender.send(Message::Text(message.to_string().into()));
+        let _ = client_info.sender.send(Message::Text(message.to_string().into())).await;
     }
 }

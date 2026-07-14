@@ -185,8 +185,9 @@ pub fn log(level: LogLevel, component: &str, message: &str) {
     );
 }
 
-pub fn print_banner(ws_address: &str) {
+pub fn print_banner(version: &str, ws_address: &str) {
     println!();
+    println!("  Impulse Server v{} by oqune", version);
     println!("  WebSocket: {}", ws_address);
     println!();
 }

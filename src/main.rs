@@ -9,7 +9,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     set_colors_enabled(!cli.no_color);
     let app_config = load_config(&cli);
 
-    impulse_server::console::print_banner(&app_config.server.address);
+    impulse_server::console::print_banner(env!("CARGO_PKG_VERSION"), &app_config.server.address);
 
     let server_config = impulse_server::ServerConfig {
         address: app_config.server.address.clone(),
