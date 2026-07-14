@@ -17,8 +17,8 @@ const MAX_NAME_LEN: usize = 32;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
-    pub v: u8,
-    pub ts: u64,
+    pub version: u8,
+    pub timestamp: u64,
     #[serde(flatten)]
     pub body: MessageBody,
 }
@@ -232,8 +232,8 @@ fn sanitize_name(name: &str) -> String {
 
 fn make_envelope(body: MessageBody) -> Envelope {
     Envelope {
-        v: 1,
-        ts: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
+        version: 1,
+        timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
         body,
     }
 }
@@ -280,7 +280,7 @@ async fn handle_client(
 
     let mut client_name = "Anonymous".to_string();
     let authenticated = match serde_json::from_str::<Envelope>(&auth_message) {
-        Ok(env) if env.v == 1 => match env.body {
+        Ok(env) if env.version == 1 => match env.body {
             MessageBody::Auth(req) => {
                 match verify(&req.password, &hashed_password) {
                     Ok(valid) => {
@@ -357,7 +357,7 @@ async fn handle_client(
                             continue;
                         }
                         match serde_json::from_str::<Envelope>(&text) {
-                            Ok(env) if env.v == 1 => match env.body {
+                            Ok(env) if env.version == 1 => match env.body {
                                 MessageBody::Chat(chat) => {
                                     let server_msg = make_envelope(MessageBody::Chat(ChatMessage {
                                         content: chat.content,
