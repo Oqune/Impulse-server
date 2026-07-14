@@ -7,114 +7,114 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)]()
 
-WebSocket chat server with bcrypt authentication.
+WebSocket 聊天服务器，基于 bcrypt 认证。
 
 </div>
 
 ---
 
-## Quick Start
+## 语言
+
+[🇺🇸 English](README.md) | [🇷🇺 Русский](README.ru.md) | [🇨🇳 中文](README.zh.md)
+
+---
+
+## 快速开始
 
 ```bash
-# Build release
+# 编译发布版
 cargo build --release
 
-# Run with defaults (0.0.0.0:8087)
+# 默认运行 (0.0.0.0:8087)
 ./target/release/impulse-server
 
-# Custom host/port
+# 自定义地址/端口
 ./target/release/impulse-server --host 0.0.0.0 --port 9090
 
-# Custom password
+# 自定义密码
 ./target/release/impulse-server -P my_secret_password
 
-# Disable colors (for cmd.exe or non-TTY)
+# 禁用颜色 (适用于 cmd.exe 或非 TTY)
 ./target/release/impulse-server --no-color
 ```
 
-### Platform Notes
+### 平台说明
 
-| Platform | Binary | Run Command |
-|----------|--------|-------------|
+| 平台 | 二进制文件 | 运行命令 |
+|------|-----------|---------|
 | **Windows** | `impulse-server.exe` | `.\target\release\impulse-server.exe` |
 | **Linux** | `impulse-server` | `./target/release/impulse-server` |
 | **macOS** | `impulse-server` | `./target/release/impulse-server` |
 
 ---
 
-## Language
+## CLI 参数
 
-[English](README.md) | [Русский](README.ru.md)
-
----
-
-## CLI Reference
-
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--host` | | Listen address | `0.0.0.0` |
-| `--port` | `-p` | Port | `8087` |
-| `--password` | `-P` | Server password | `your_secure_password_here` |
-| `--no-color` | | Disable ANSI colors | `false` |
-| `--help` | `-h` | Show help | |
+| 参数 | 简写 | 说明 | 默认值 |
+|------|------|------|--------|
+| `--host` | | 监听地址 | `0.0.0.0` |
+| `--port` | `-p` | 端口 | `8087` |
+| `--password` | `-P` | 服务器密码 | `your_secure_password_here` |
+| `--no-color` | | 禁用 ANSI 颜色 | `false` |
+| `--help` | `-h` | 显示帮助 | |
 
 ---
 
-## Protocol
+## 协议
 
-All messages are JSON objects with three fields: `version` (u8), `timestamp` (u64, milliseconds since epoch), and `type` (string).
+所有消息均为 JSON，包含三个字段：`version` (u8)、`timestamp` (u64，毫秒级时间戳)、`type` (字符串)。
 
-### Message Types
+### 消息类型
 
-| Type | Direction | Fields |
-|------|-----------|--------|
-| `auth` | client → server | `name`, `password` |
-| `auth_result` | server → client | `success`, `client_id`, `message` |
-| `chat` | both | `content` |
-| `event` | server → client | `event` (`joined`/`left`), `user_id`, `user_name` |
-| `error` | server → client | `code`, `message` |
+| Type | 方向 | 字段 |
+|------|------|------|
+| `auth` | 客户端 → 服务端 | `name`, `password` |
+| `auth_result` | 服务端 → 客户端 | `success`, `client_id`, `message` |
+| `chat` | 双向 | `content` |
+| `event` | 服务端 → 客户端 | `event` (`joined`/`left`), `user_id`, `user_name` |
+| `error` | 服务端 → 客户端 | `code`, `message` |
 
-### Examples
+### 示例
 
 ```json
 {"version":1,"timestamp":1720000000000,"type":"auth","name":"Oqune","password":"secret"}
-{"version":1,"timestamp":1720000000000,"type":"auth_result","success":true,"client_id":1,"message":"Authenticated"}
-{"version":1,"timestamp":1720000000000,"type":"chat","content":"hello"}
+{"version":1,"timestamp":1720000000000,"type":"auth_result","success":true,"client_id":1,"message":"认证成功"}
+{"version":1,"timestamp":1720000000000,"type":"chat","content":"你好"}
 {"version":1,"timestamp":1720000000000,"type":"event","event":"joined","user_id":1,"user_name":"Oqune"}
 {"version":1,"timestamp":1720000000000,"type":"error","code":401,"message":"Auth failed"}
 ```
 
 ---
 
-## Security
+## 安全性
 
-- **Mandatory password** — rejected if missing or wrong
-- **bcrypt hashing** — passwords never stored in plain text
-- **Connection limit** — max 100 concurrent clients
-- **Message size limit** — 4 KB per message
-- **Input sanitization** — usernames stripped of control chars, max 32 chars
-- **Backpressure** — bounded channel (16 messages) per client
-- **Overflow protection** — client ID counter guarded at `u32::MAX`
+- **强制密码** —— 缺失或错误时拒绝连接
+- **bcrypt 哈希** —— 密码不以明文存储
+- **连接数限制** —— 最多 100 个并发客户端
+- **消息大小限制** —— 单条消息最大 4 KB
+- **输入清理** —— 用户名去除控制字符，最长 32 字符
+- **背压控制** —— 每客户端有限队列 (16 条消息)
+- **溢出保护** —— client_id 计数器受限于 `u32::MAX`
 
 ---
 
-## TLS Support
+## TLS 支持
 
-Build with TLS feature for `wss://` support:
+启用 TLS 特性以支持 `wss://`：
 
 ```bash
 cargo build --release --features tls
 ```
 
-Requires a certificate and private key in PEM format. See [rustls docs](https://docs.rs/rustls) for TLS config.
+需要 PEM 格式的证书和私钥。详见 [rustls 文档](https://docs.rs/rustls)。
 
 ---
 
-## Cross-Platform Release Build
+## 跨平台构建
 
-### Using GitHub Actions (Recommended)
+### 使用 GitHub Actions (推荐)
 
-Create `.github/workflows/release.yml`:
+创建 `.github/workflows/release.yml`：
 
 ```yaml
 name: Release
@@ -138,7 +138,7 @@ jobs:
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact: impulse-server-macos
-            # For Apple Silicon:
+            # Apple Silicon:
             # - os: macos-latest
             #   target: aarch64-apple-darwin
             #   artifact: impulse-server-macos-arm64
@@ -169,35 +169,35 @@ jobs:
           files: impulse-server-*
 ```
 
-### Manual Cross-Compilation
+### 手动交叉编译
 
 ```bash
-# Install targets
+# 安装目标平台
 rustup target add x86_64-unknown-linux-gnu
 rustup target add x86_64-pc-windows-msvc
 rustup target add x86_64-apple-darwin
 rustup target add aarch64-apple-darwin
 
-# Build for each
+# 为每个平台构建
 cargo build --release --target x86_64-unknown-linux-gnu
 cargo build --release --target x86_64-pc-windows-msvc
 cargo build --release --target x86_64-apple-darwin
 cargo build --release --target aarch64-apple-darwin
 ```
 
-Binaries appear in `target/<target>/release/`.
+构建产物位于 `target/<target>/release/`。
 
 ---
 
 ## GitHub Packages
 
-The **Packages** tab hosts registries for:
-- **Cargo crates** (`cargo publish` → crates.io or GitHub Packages)
-- **Docker images** (`docker push ghcr.io/user/repo`)
-- **npm packages** (`npm publish --registry=https://npm.pkg.github.com`)
-- **NuGet, Maven, Rubygems**, etc.
+GitHub 的 **Packages** 标签提供包注册表托管：
+- **Cargo crates** (`cargo publish` → crates.io 或 GitHub Packages)
+- **Docker 镜像** (`docker push ghcr.io/user/repo`)
+- **npm 包** (`npm publish --registry=https://npm.pkg.github.com`)
+- **NuGet, Maven, Rubygems** 等
 
-To publish this as a crate:
+将本项目发布为 crate：
 
 ```toml
 # Cargo.toml
@@ -208,10 +208,10 @@ publish = true
 ```
 
 ```bash
-cargo publish --registry=github  # or crates.io
+cargo publish --registry=github  # 或 crates.io
 ```
 
-Or push a Docker image:
+或推送 Docker 镜像：
 
 ```dockerfile
 FROM rust:1.78 AS builder
@@ -232,11 +232,11 @@ docker push ghcr.io/youruser/impulse-server:v1.0.0
 
 ---
 
-## Dependencies
+## 依赖
 
-- [tokio](https://crates.io/crates/tokio) — async runtime
+- [tokio](https://crates.io/crates/tokio) — 异步运行时
 - [tokio-tungstenite](https://crates.io/crates/tokio-tungstenite) — WebSocket
-- [bcrypt](https://crates.io/crates/bcrypt) — password hashing
-- [serde](https://crates.io/crates/serde) / [serde_json](https://crates.io/crates/serde_json) — serialization
-- [clap](https://crates.io/crates/clap) — CLI parsing
-- [rustls](https://crates.io/crates/rustls) / [rustls-pemfile](https://crates.io/crates/rustls-pemfile) — optional, for TLS
+- [bcrypt](https://crates.io/crates/bcrypt) — 密码哈希
+- [serde](https://crates.io/crates/serde) / [serde_json](https://crates.io/crates/serde_json) — 序列化
+- [clap](https://crates.io/crates/clap) — CLI 解析
+- [rustls](https://crates.io/crates/rustls) / [rustls-pemfile](https://crates.io/crates/rustls-pemfile) — 可选，用于 TLS

@@ -13,7 +13,7 @@ WebSocket-чат сервер с bcrypt-аутентификацией.
 
 ---
 
-## Быстрый старт
+## Запуск
 
 ```bash
 # Сборка релиза
@@ -22,20 +22,20 @@ cargo build --release
 # Запуск с дефолтами (0.0.0.0:8087)
 ./target/release/impulse-server
 
-# Кастомный адрес/порт
+# Кастомный хост/порт
 ./target/release/impulse-server --host 0.0.0.0 --port 9090
 
 # Кастомный пароль
 ./target/release/impulse-server -P my_secret_password
 
-# Без цветов (cmd.exe или не-TTY)
+# Без цветов (для cmd.exe или не-TTY)
 ./target/release/impulse-server --no-color
 ```
 
-### По платформам
+### Платформы
 
 | Платформа | Бинарник | Команда запуска |
-|-----------|----------|-----------------|
+|----------|----------|-----------------|
 | **Windows** | `impulse-server.exe` | `.\target\release\impulse-server.exe` |
 | **Linux** | `impulse-server` | `./target/release/impulse-server` |
 | **macOS** | `impulse-server` | `./target/release/impulse-server` |
@@ -62,7 +62,7 @@ cargo build --release
 
 ## Протокол
 
-Все сообщения — JSON с тремя полями: `version` (u8), `timestamp` (u64, миллисекунды с эпохи), `type` (строка).
+Все сообщения — JSON с полями: `version` (u8), `timestamp` (u64, мс с эпохи), `type` (string).
 
 ### Типы сообщений
 
@@ -88,31 +88,31 @@ cargo build --release
 
 ## Безопасность
 
-- **Обязательный пароль** — отказ при отсутствии или неверном
-- **bcrypt** — пароли никогда не хранятся в открытом виде
-- **Лимит соединений** — максимум 100 клиентов одновременно
-- **Лимит размера** — 4 КБ на сообщение
-- **Санитизация** — имена очищаются от управляющих символов, макс. 32 символа
-- **Backpressure** — ограниченный канал (16 сообщений) на клиент
-- **Защита от overflow** — счётчик client_id ограничен `u32::MAX`
+- **Обязательный пароль** — отклоняется если отсутствует или неверен
+- **bcrypt-хеширование** — пароли никогда не хранятся в открытом виде
+- **Лимит подключений** — максимум 100 одновременных клиентов
+- **Лимит размера сообщения** — 4 КБ
+- **Санитизация** — имена очищены от управляющих символов, максимум 32 символа
+- **Backpressure** — ограниченный канал (16 сообщений) на клиента
+- **Защита от overflow** — счётчик client_id защищён на `u32::MAX`
 
 ---
 
 ## TLS
 
-Сборка с TLS для `wss://`:
+Сборка с TLS для поддержки `wss://`:
 
 ```bash
 cargo build --release --features tls
 ```
 
-Требуется сертификат и приватный ключ в PEM. См. [rustls docs](https://docs.rs/rustls).
+Требуются сертификат и приватный ключ в PEM. См. [rustls docs](https://docs.rs/rustls).
 
 ---
 
-## Сборка релизов под разные платформы
+## Кроссплатформенная сборка релиза
 
-### GitHub Actions (рекомендуется)
+### Через GitHub Actions (рекомендуется)
 
 Создайте `.github/workflows/release.yml`:
 
@@ -169,16 +169,16 @@ jobs:
           files: impulse-server-*
 ```
 
-### Ручная кросс-компиляция
+### Ручная кросскомпиляция
 
 ```bash
-# Добавить цели
+# Установка таргетов
 rustup target add x86_64-unknown-linux-gnu
 rustup target add x86_64-pc-windows-msvc
 rustup target add x86_64-apple-darwin
 rustup target add aarch64-apple-darwin
 
-# Сборка для каждой
+# Сборка для каждого
 cargo build --release --target x86_64-unknown-linux-gnu
 cargo build --release --target x86_64-pc-windows-msvc
 cargo build --release --target x86_64-apple-darwin
@@ -191,15 +191,27 @@ cargo build --release --target aarch64-apple-darwin
 
 ## GitHub Packages
 
-Вкладка **Packages** в GitHub — это хостинг реестров пакетов:
-- **Cargo crates** (`cargo publish` → crates.io или GitHub Packages)
-- **Docker образы** (`docker push ghcr.io/user/repo`)
-- **npm пакеты** (`npm publish --registry=https://npm.pkg.github.com`)
+Вкладка **Packages** на GitHub предоставляет реестры для:
+- **Cargo-крейтов** (`cargo publish` → crates.io или GitHub Packages)
+- **Docker-образов** (`docker push ghcr.io/user/repo`)
+- **npm-пакетов** (`npm publish --registry=https://npm.pkg.github.com`)
 - **NuGet, Maven, Rubygems** и др.
 
-Для этого проекта:
-- Публикация как crate: `cargo publish --registry=github`
-- Docker образ в `ghcr.io`:
+Для публикации этого сервера как крейта:
+
+```toml
+# Cargo.toml
+[package]
+name = "impulse-server"
+repository = "https://github.com/youruser/impulse-server"
+publish = true
+```
+
+```bash
+cargo publish --registry=github  # или crates.io
+```
+
+Или Docker-образ:
 
 ```dockerfile
 FROM rust:1.78 AS builder
@@ -222,9 +234,9 @@ docker push ghcr.io/youruser/impulse-server:v1.0.0
 
 ## Зависимости
 
-- [tokio](https://crates.io/crates/tokio) — async runtime
+- [tokio](https://crates.io/crates/tokio) — асинхронный рантайм
 - [tokio-tungstenite](https://crates.io/crates/tokio-tungstenite) — WebSocket
 - [bcrypt](https://crates.io/crates/bcrypt) — хеширование паролей
-- [serde](https://crates.io/crates/serde) — сериализация
-- [clap](https://crates.io/crates/clap) — CLI парсинг
-- [rustls](https://crates.io/crates/rustls) — TLS (опционально)
+- [serde](https://crates.io/crates/serde) / [serde_json](https://crates.io/crates/serde_json) — сериализация
+- [clap](https://crates.io/crates/clap) — CLI-парсинг
+- [rustls](https://crates.io/crates/rustls) / [rustls-pemfile](https://crates.io/crates/rustls-pemfile) — опционально, для TLS
