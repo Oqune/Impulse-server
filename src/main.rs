@@ -1,7 +1,7 @@
 use clap::Parser;
-use impulse_server::config::{load_config, CliArgs};
-use impulse_server::console::{log, LogLevel, set_colors_enabled};
 use impulse_server::WsServer;
+use impulse_server::config::{CliArgs, load_config};
+use impulse_server::console::{LogLevel, log, set_colors_enabled};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -13,7 +13,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut server = WsServer::with_config(app_config.server.clone());
 
-    log(LogLevel::Info, "SERVER", &format!("Starting secure (WSS) on {}", server.address()));
+    log(
+        LogLevel::Info,
+        "SERVER",
+        &format!("Starting secure (WSS) on {}", server.address()),
+    );
     println!();
 
     tokio::select! {
@@ -34,13 +38,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(e) = tokio::signal::ctrl_c().await {
-            log(LogLevel::Error, "SERVER", &format!("Failed to listen for Ctrl+C: {}", e));
+            log(
+                LogLevel::Error,
+                "SERVER",
+                &format!("Failed to listen for Ctrl+C: {}", e),
+            );
         }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        if let Ok(mut sig) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        if let Ok(mut sig) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
             sig.recv().await;
         }
     };

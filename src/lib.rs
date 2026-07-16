@@ -1,16 +1,16 @@
 pub mod config;
 pub mod console;
 
-use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::tungstenite::Message;
+use bcrypt::{DEFAULT_COST, hash, verify};
 use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
-use bcrypt::{hash, verify, DEFAULT_COST};
-use serde::{Deserialize, Serialize};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
+use tokio_tungstenite::tungstenite::Message;
 
 const MAX_CLIENTS: usize = 100;
 const MAX_MSG_SIZE: usize = 4096;
@@ -114,7 +114,10 @@ struct ClientIdPool {
 
 impl ClientIdPool {
     fn new() -> Self {
-        Self { next: 1, free: VecDeque::new() }
+        Self {
+            next: 1,
+            free: VecDeque::new(),
+        }
     }
 
     fn acquire(&mut self) -> Option<u32> {
@@ -148,11 +151,10 @@ impl WsServer {
     }
 
     pub fn with_config(config: config::ServerSettings) -> Self {
-        let tls_acceptor = load_tls_acceptor(&config)
-            .unwrap_or_else(|e| {
-                log_error("SERVER", &format!("Failed to load TLS certificate: {}", e));
-                std::process::exit(1);
-            });
+        let tls_acceptor = load_tls_acceptor(&config).unwrap_or_else(|e| {
+            log_error("SERVER", &format!("Failed to load TLS certificate: {}", e));
+            std::process::exit(1);
+        });
 
         Self {
             config,
@@ -183,12 +185,19 @@ impl WsServer {
         let clients_map = self.clients.lock().await;
         if let Some(client_info) = clients_map.get(&client_id) {
             if let Ok(json_msg) = serde_json::to_string(message) {
-                if let Err(e) = client_info.sender.send(Message::Text(json_msg.into())).await {
+                if let Err(e) = client_info
+                    .sender
+                    .send(Message::Text(json_msg.into()))
+                    .await
+                {
                     return Err(format!("Failed to send to client {}: {}", client_id, e));
                 }
                 Ok(())
             } else {
-                Err(format!("Failed to serialize message for client {}", client_id))
+                Err(format!(
+                    "Failed to serialize message for client {}",
+                    client_id
+                ))
             }
         } else {
             Err(format!("Client {} not found", client_id))
@@ -197,7 +206,13 @@ impl WsServer {
 
     pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind(&self.config.address).await?;
-        log_info("SERVER", &format!("Secure WebSocket (WSS) listening on {}", self.config.address));
+        log_info(
+            "SERVER",
+            &format!(
+                "Secure WebSocket (WSS) listening on {}",
+                self.config.address
+            ),
+        );
 
         let hashed_password = hash(&self.config.password, DEFAULT_COST)?;
         log_info("SERVER", "Authentication enabled");
@@ -284,13 +299,19 @@ fn sanitize_name(name: &str) -> String {
 fn make_envelope(body: MessageBody) -> Envelope {
     Envelope {
         version: 1,
-        timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
         body,
     }
 }
 
 async fn send_error(ws_tx: &mut (impl SinkExt<Message> + Unpin), code: u16, message: &str) {
-    let env = make_envelope(MessageBody::Error(ErrorMessage { code, message: message.to_string() }));
+    let env = make_envelope(MessageBody::Error(ErrorMessage {
+        code,
+        message: message.to_string(),
+    }));
     if let Ok(json) = serde_json::to_string(&env) {
         let _ = ws_tx.send(Message::Text(json.into())).await;
     }
@@ -315,12 +336,18 @@ async fn handle_client(
         }
     };
 
-    log_debug("WS", &format!("Client {} connecting from {:?}", client_id, peer_addr));
+    log_debug(
+        "WS",
+        &format!("Client {} connecting from {:?}", client_id, peer_addr),
+    );
 
     let ws_stream = match tokio_tungstenite::accept_async(stream).await {
         Ok(s) => s,
         Err(e) => {
-            log_error("WS", &format!("Handshake error for client {}: {}", client_id, e));
+            log_error(
+                "WS",
+                &format!("Handshake error for client {}: {}", client_id, e),
+            );
             id_pool.lock().await.release(client_id);
             return;
         }
@@ -330,27 +357,42 @@ async fn handle_client(
 
     let auth_message = match ws_rx.next().await {
         Some(Ok(Message::Text(text))) => {
-            log_debug("WS", &format!("Client {} auth payload: {}", client_id, text));
+            log_debug(
+                "WS",
+                &format!("Client {} auth payload: {}", client_id, text),
+            );
             text
         }
         Some(Ok(Message::Binary(_))) => {
-            log_warn("WS", &format!("Client {} sent binary instead of auth text", client_id));
+            log_warn(
+                "WS",
+                &format!("Client {} sent binary instead of auth text", client_id),
+            );
             let _ = ws_tx.send(Message::Close(None)).await;
             id_pool.lock().await.release(client_id);
             return;
         }
         Some(Ok(Message::Close(_))) | None => {
-            log_debug("WS", &format!("Client {} disconnected before auth", client_id));
+            log_debug(
+                "WS",
+                &format!("Client {} disconnected before auth", client_id),
+            );
             id_pool.lock().await.release(client_id);
             return;
         }
         Some(Err(e)) => {
-            log_error("WS", &format!("Client {} receive error during auth: {}", client_id, e));
+            log_error(
+                "WS",
+                &format!("Client {} receive error during auth: {}", client_id, e),
+            );
             id_pool.lock().await.release(client_id);
             return;
         }
         _ => {
-            log_warn("WS", &format!("Client {} unexpected message type during auth", client_id));
+            log_warn(
+                "WS",
+                &format!("Client {} unexpected message type during auth", client_id),
+            );
             let _ = ws_tx.send(Message::Close(None)).await;
             id_pool.lock().await.release(client_id);
             return;
@@ -361,32 +403,52 @@ async fn handle_client(
     let authenticated = match serde_json::from_str::<Envelope>(&auth_message) {
         Ok(env) if env.version == 1 => match env.body {
             MessageBody::Auth(req) => {
-                log_debug("WS", &format!("Client {} auth attempt: name={}", client_id, req.name));
+                log_debug(
+                    "WS",
+                    &format!("Client {} auth attempt: name={}", client_id, req.name),
+                );
                 match verify(&req.password, &hashed_password) {
                     Ok(valid) => {
                         if valid {
                             client_name = sanitize_name(&req.name);
                         }
-                        log_info("WS", &format!("Client {} auth result: {} (name={})", client_id, if valid { "success" } else { "failed" }, client_name));
+                        log_info(
+                            "WS",
+                            &format!(
+                                "Client {} auth result: {} (name={})",
+                                client_id,
+                                if valid { "success" } else { "failed" },
+                                client_name
+                            ),
+                        );
                         valid
                     }
                     Err(e) => {
-                        log_error("WS", &format!("Client {} bcrypt verify error: {}", client_id, e));
+                        log_error(
+                            "WS",
+                            &format!("Client {} bcrypt verify error: {}", client_id, e),
+                        );
                         false
                     }
                 }
             }
             _ => {
-                log_warn("WS", &format!("Client {} invalid auth message type", client_id));
+                log_warn(
+                    "WS",
+                    &format!("Client {} invalid auth message type", client_id),
+                );
                 false
             }
-        }
+        },
         Ok(_) => {
             log_warn("WS", &format!("Client {} bad protocol version", client_id));
             false
         }
         Err(e) => {
-            log_warn("WS", &format!("Client {} invalid JSON in auth: {}", client_id, e));
+            log_warn(
+                "WS",
+                &format!("Client {} invalid JSON in auth: {}", client_id, e),
+            );
             false
         }
     };
@@ -416,12 +478,34 @@ async fn handle_client(
         if current_count >= MAX_CLIENTS {
             drop(clients_map);
             send_error(&mut ws_tx, 429, "Server full").await;
-            log_warn("WS", &format!("Rejected client {}: server full ({}/{})", client_id, current_count, MAX_CLIENTS));
+            log_warn(
+                "WS",
+                &format!(
+                    "Rejected client {}: server full ({}/{})",
+                    client_id, current_count, MAX_CLIENTS
+                ),
+            );
             id_pool.lock().await.release(client_id);
             return;
         }
-        clients_map.insert(client_id, ClientInfo { id: client_id, name: client_name.clone(), sender: tx, last_seen: last_seen.clone() });
-        log_info("WS", &format!("Client {} ({}) connected [total: {}]", client_id, client_name, clients_map.len()));
+        clients_map.insert(
+            client_id,
+            ClientInfo {
+                id: client_id,
+                name: client_name.clone(),
+                sender: tx,
+                last_seen: last_seen.clone(),
+            },
+        );
+        log_info(
+            "WS",
+            &format!(
+                "Client {} ({}) connected [total: {}]",
+                client_id,
+                client_name,
+                clients_map.len()
+            ),
+        );
     }
 
     let event = make_envelope(MessageBody::Event(EventMessage {
@@ -433,7 +517,8 @@ async fn handle_client(
         broadcast_raw_message(&clients, &json_msg, Some(client_id)).await;
     }
 
-    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+    let mut heartbeat =
+        tokio::time::interval(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
     let mut last_pong = std::time::Instant::now();
 
     loop {
@@ -535,7 +620,10 @@ async fn handle_client(
         }
     }
 
-    log_info("WS", &format!("Client {} ({}) disconnecting", client_id, client_name));
+    log_info(
+        "WS",
+        &format!("Client {} ({}) disconnecting", client_id, client_name),
+    );
 
     let leave = make_envelope(MessageBody::Event(EventMessage {
         kind: EventKind::Left,
@@ -549,15 +637,41 @@ async fn handle_client(
     {
         let mut clients_map = clients.lock().await;
         clients_map.remove(&client_id);
-        log_info("WS", &format!("Client {} ({}) disconnected [remaining: {}]", client_id, client_name, clients_map.len()));
+        log_info(
+            "WS",
+            &format!(
+                "Client {} ({}) disconnected [remaining: {}]",
+                client_id,
+                client_name,
+                clients_map.len()
+            ),
+        );
     }
 
     id_pool.lock().await.release(client_id);
 }
 
-fn load_tls_acceptor(config: &config::ServerSettings) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
+fn load_tls_acceptor(
+    config: &config::ServerSettings,
+) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
+    if config.tls_cert.is_empty() || config.tls_key.is_empty() {
+        return Err(
+            "TLS certificate/key not provided. Start the server with --tls-cert <path> and --tls-key <path> \
+             (e.g. --tls-cert cert.pem --tls-key key.pem)"
+                .into(),
+        );
+    }
+
     let cert_path = &config.tls_cert;
     let key_path = &config.tls_key;
+
+    if !std::path::Path::new(cert_path).exists() || !std::path::Path::new(key_path).exists() {
+        log_warn(
+            "SERVER",
+            "TLS certificate or key not found, generating a self-signed certificate",
+        );
+        generate_self_signed_cert(cert_path, key_path, &config.tls_san)?;
+    }
 
     let cert_file = std::fs::File::open(cert_path)
         .map_err(|e| format!("Failed to open cert {}: {}", cert_path, e))?;
@@ -565,17 +679,78 @@ fn load_tls_acceptor(config: &config::ServerSettings) -> Result<TlsAcceptor, Box
         .map_err(|e| format!("Failed to open key {}: {}", key_path, e))?;
 
     let mut reader = std::io::BufReader::new(cert_file);
-    let certs: Vec<rustls::pki_types::CertificateDer> = rustls_pemfile::certs(&mut reader).collect::<Result<_, _>>()?;
+    let certs: Vec<rustls::pki_types::CertificateDer> =
+        rustls_pemfile::certs(&mut reader).collect::<Result<_, _>>()?;
 
     let mut reader = std::io::BufReader::new(key_file);
-    let key = rustls_pemfile::private_key(&mut reader)?
-        .ok_or("No private key found in TLS key file")?;
+    let key =
+        rustls_pemfile::private_key(&mut reader)?.ok_or("No private key found in TLS key file")?;
 
     let config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
 
     Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
+/// Generate a self-signed certificate/key pair (PEM) and write it to disk.
+/// Used as a fallback when no certificate is provided, so the server can start
+/// out of the box. The certificate is valid for `localhost`, the machine
+/// hostname, and any extra SANs supplied via `--tls-san` (e.g. a public IP).
+fn generate_self_signed_cert(
+    cert_path: &str,
+    key_path: &str,
+    extra_sans: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rcgen::{CertificateParams, Ia5String, KeyPair, SanType};
+
+    let mut sans: Vec<SanType> = Vec::new();
+    sans.push(SanType::DnsName(Ia5String::try_from(
+        "localhost".to_string(),
+    )?));
+    sans.push(SanType::IpAddress("127.0.0.1".parse()?));
+    if let Ok(hostname) = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME"))
+        && !hostname.is_empty()
+        && let Ok(ia5) = Ia5String::try_from(hostname)
+    {
+        sans.push(SanType::DnsName(ia5));
+    }
+    for san in extra_sans {
+        if let Ok(ip) = san.parse::<std::net::IpAddr>() {
+            sans.push(SanType::IpAddress(ip));
+        } else if let Ok(ia5) = Ia5String::try_from(san.clone()) {
+            sans.push(SanType::DnsName(ia5));
+        }
+    }
+
+    let mut params = CertificateParams::new(vec!["localhost".to_string()])?;
+    params.subject_alt_names = sans;
+
+    let key = KeyPair::generate()?;
+    let cert = params.self_signed(&key)?;
+
+    let pem_cert = cert.pem();
+    let pem_key = key.serialize_pem();
+
+    if let Some(parent) = std::path::Path::new(cert_path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    std::fs::write(cert_path, pem_cert)
+        .map_err(|e| format!("Failed to write cert {}: {}", cert_path, e))?;
+    std::fs::write(key_path, pem_key)
+        .map_err(|e| format!("Failed to write key {}: {}", key_path, e))?;
+
+    log_info(
+        "SERVER",
+        &format!(
+            "Self-signed certificate written to {} and {}",
+            cert_path, key_path
+        ),
+    );
+    Ok(())
 }
 
 async fn broadcast_message(clients: &ClientsMap, message: &Envelope, exclude_id: Option<u32>) {
@@ -591,7 +766,12 @@ async fn broadcast_raw_message(clients: &ClientsMap, message: &str, exclude_id: 
         if exclude_id == Some(*id) {
             continue;
         }
-        if client_info.sender.send(Message::Text(message.to_string().into())).await.is_err() {
+        if client_info
+            .sender
+            .send(Message::Text(message.to_string().into()))
+            .await
+            .is_err()
+        {
             dead.push(*id);
         }
     }

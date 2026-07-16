@@ -28,16 +28,41 @@ cargo build --release
 | `--no-color` | | Disable ANSI colors | `false` |
 | `--tls-cert` | | Path to TLS certificate (PEM) | `cert.pem` |
 | `--tls-key` | | Path to TLS private key (PEM) | `key.pem` |
+| `--tls-san` | | Extra SAN (DNS/IP) for the auto-generated self-signed cert (repeatable) | _none_ |
 
 The server listens **only** on a secure `wss://` endpoint. A plain (unencrypted) `ws://` listener is not provided — TLS is required for the connection.
 
 ## Certificate
 
-Provide a PEM certificate/key pair. For local testing, generate a self-signed one:
+If `cert.pem` / `key.pem` are missing next to the executable, the server
+**auto-generates a self-signed certificate** on first start. By default it is
+valid for `localhost`, `127.0.0.1` and the machine hostname.
+
+To make the certificate valid for the address your clients connect to (e.g. a
+public IP behind port forwarding), pass it as a SAN:
 
 ```bash
-openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=localhost"
+./target/release/impulse-server --tls-san 203.0.113.45
 ```
+
+You can repeat `--tls-san` for multiple names/IPs. To use your own certificate
+instead, provide it explicitly:
+
+```bash
+./target/release/impulse-server --tls-cert cert.pem --tls-key key.pem
+```
+
+### Trusting the self-signed certificate
+
+A self-signed certificate encrypts traffic but is not trusted by clients out of
+the box, so they reject it with `CertificateUnknown`. For testing you can
+disable certificate validation on the client (e.g. `danger_accept_invalid_certs`
+/ `ssl_verify=false`) — this still encrypts, but allows MITM. For real use,
+either:
+
+- distribute the generated `cert.pem` to clients and pin/trust it (add it to the
+  OS trust store, or configure the client to trust that specific cert), or
+- obtain a CA-signed certificate (e.g. Let's Encrypt — requires a domain).
 
 In production use a real certificate (e.g. Let's Encrypt). The private key must be in PKCS8/SEC1 PEM format.
 

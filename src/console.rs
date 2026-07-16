@@ -65,8 +65,16 @@ impl Styled {
         } else {
             String::new()
         };
-        let suffix = if colors_enabled() { colors::RESET.to_string() } else { String::new() };
-        Self { text, prefix, suffix }
+        let suffix = if colors_enabled() {
+            colors::RESET.to_string()
+        } else {
+            String::new()
+        };
+        Self {
+            text,
+            prefix,
+            suffix,
+        }
     }
 }
 
@@ -125,22 +133,54 @@ macro_rules! impl_style {
 impl_style!(String, &str);
 
 impl Style for Styled {
-    fn bold(self) -> Styled { Styled::new(self.to_string(), "", true) }
-    fn dim(self) -> Styled { Styled::new(self.to_string(), colors::DIM, false) }
-    fn red(self) -> Styled { Styled::new(self.to_string(), colors::RED, false) }
-    fn green(self) -> Styled { Styled::new(self.to_string(), colors::GREEN, false) }
-    fn yellow(self) -> Styled { Styled::new(self.to_string(), colors::YELLOW, false) }
-    fn blue(self) -> Styled { Styled::new(self.to_string(), colors::BLUE, false) }
-    fn cyan(self) -> Styled { Styled::new(self.to_string(), colors::CYAN, false) }
-    fn magenta(self) -> Styled { Styled::new(self.to_string(), colors::MAGENTA, false) }
-    fn white(self) -> Styled { Styled::new(self.to_string(), colors::WHITE, false) }
-    fn bright_red(self) -> Styled { Styled::new(self.to_string(), colors::BRIGHT_RED, true) }
-    fn bright_green(self) -> Styled { Styled::new(self.to_string(), colors::BRIGHT_GREEN, true) }
-    fn bright_yellow(self) -> Styled { Styled::new(self.to_string(), colors::BRIGHT_YELLOW, false) }
-    fn bright_blue(self) -> Styled { Styled::new(self.to_string(), colors::BRIGHT_BLUE, true) }
-    fn bright_cyan(self) -> Styled { Styled::new(self.to_string(), colors::BRIGHT_CYAN, false) }
-    fn bright_magenta(self) -> Styled { Styled::new(self.to_string(), colors::BRIGHT_MAGENTA, false) }
-    fn bright_white(self) -> Styled { Styled::new(self.to_string(), colors::BRIGHT_WHITE, false) }
+    fn bold(self) -> Styled {
+        Styled::new(self.to_string(), "", true)
+    }
+    fn dim(self) -> Styled {
+        Styled::new(self.to_string(), colors::DIM, false)
+    }
+    fn red(self) -> Styled {
+        Styled::new(self.to_string(), colors::RED, false)
+    }
+    fn green(self) -> Styled {
+        Styled::new(self.to_string(), colors::GREEN, false)
+    }
+    fn yellow(self) -> Styled {
+        Styled::new(self.to_string(), colors::YELLOW, false)
+    }
+    fn blue(self) -> Styled {
+        Styled::new(self.to_string(), colors::BLUE, false)
+    }
+    fn cyan(self) -> Styled {
+        Styled::new(self.to_string(), colors::CYAN, false)
+    }
+    fn magenta(self) -> Styled {
+        Styled::new(self.to_string(), colors::MAGENTA, false)
+    }
+    fn white(self) -> Styled {
+        Styled::new(self.to_string(), colors::WHITE, false)
+    }
+    fn bright_red(self) -> Styled {
+        Styled::new(self.to_string(), colors::BRIGHT_RED, true)
+    }
+    fn bright_green(self) -> Styled {
+        Styled::new(self.to_string(), colors::BRIGHT_GREEN, true)
+    }
+    fn bright_yellow(self) -> Styled {
+        Styled::new(self.to_string(), colors::BRIGHT_YELLOW, false)
+    }
+    fn bright_blue(self) -> Styled {
+        Styled::new(self.to_string(), colors::BRIGHT_BLUE, true)
+    }
+    fn bright_cyan(self) -> Styled {
+        Styled::new(self.to_string(), colors::BRIGHT_CYAN, false)
+    }
+    fn bright_magenta(self) -> Styled {
+        Styled::new(self.to_string(), colors::BRIGHT_MAGENTA, false)
+    }
+    fn bright_white(self) -> Styled {
+        Styled::new(self.to_string(), colors::BRIGHT_WHITE, false)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

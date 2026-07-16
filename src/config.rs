@@ -17,11 +17,22 @@ pub struct CliArgs {
     #[arg(long, help = "Disable colored output")]
     pub no_color: bool,
 
-    #[arg(long, default_value = "cert.pem", help = "Path to TLS certificate (PEM)")]
-    pub tls_cert: Option<String>,
+    #[arg(
+        long,
+        default_value = "cert.pem",
+        help = "Path to TLS certificate (PEM)"
+    )]
+    pub tls_cert: String,
 
-    #[arg(long, default_value = "key.pem", help = "Path to TLS private key (PEM)")]
-    pub tls_key: Option<String>,
+    #[arg(
+        long,
+        default_value = "key.pem",
+        help = "Path to TLS private key (PEM)"
+    )]
+    pub tls_key: String,
+
+    #[arg(long, num_args = 0.., help = "Extra SAN (DNS name or IP) for the generated self-signed certificate")]
+    pub tls_san: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +43,8 @@ pub struct ServerSettings {
     pub auth_message: String,
     pub tls_cert: String,
     pub tls_key: String,
+    #[serde(default)]
+    pub tls_san: Vec<String>,
 }
 
 fn default_auth_message() -> String {
@@ -46,6 +59,7 @@ impl Default for ServerSettings {
             auth_message: default_auth_message(),
             tls_cert: "cert.pem".to_string(),
             tls_key: "key.pem".to_string(),
+            tls_san: Vec::new(),
         }
     }
 }
@@ -54,6 +68,25 @@ impl Default for ServerSettings {
 pub struct AppConfig {
     #[serde(default)]
     pub server: ServerSettings,
+}
+
+/// Resolve a possibly-relative certificate/key path against the directory of
+/// the current executable, so that `cert.pem` placed next to the binary works
+/// regardless of the working directory the server is launched from.
+pub fn resolve_tls_path(path: &str) -> String {
+    let path_buf = std::path::Path::new(path);
+    if path_buf.is_absolute() {
+        return path.to_string();
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let resolved = dir.join(path_buf);
+        if let Some(s) = resolved.to_str() {
+            return s.to_string();
+        }
+    }
+    path.to_string()
 }
 
 pub fn load_config(cli_args: &CliArgs) -> AppConfig {
@@ -65,12 +98,9 @@ pub fn load_config(cli_args: &CliArgs) -> AppConfig {
         config.server.password = pwd.clone();
     }
 
-    if let Some(cert) = cli_args.tls_cert.clone() {
-        config.server.tls_cert = cert;
-    }
-    if let Some(key) = cli_args.tls_key.clone() {
-        config.server.tls_key = key;
-    }
+    config.server.tls_cert = resolve_tls_path(&cli_args.tls_cert);
+    config.server.tls_key = resolve_tls_path(&cli_args.tls_key);
+    config.server.tls_san = cli_args.tls_san.clone();
 
     config
 }

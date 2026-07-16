@@ -28,16 +28,32 @@ cargo build --release
 | `--no-color` | | 禁用颜色 | `false` |
 | `--tls-cert` | | TLS 证书路径（PEM） | `cert.pem` |
 | `--tls-key` | | TLS 私钥路径（PEM） | `key.pem` |
+| `--tls-san` | | 为自动生成的自签名证书附加 SAN（DNS/IP，可多次） | _无_ |
 
 服务器**仅**监听安全的 `wss://` 端点。不提供明文 `ws://` 监听端口——连接必须使用 TLS。
 
 ## 证书
 
-提供 PEM 格式的证书/密钥对。本地测试可生成自签名证书：
+如果可执行文件旁边没有 `cert.pem` / `key.pem`，服务器会在首次启动时**自动生成自签名证书**。默认对 `localhost`、`127.0.0.1` 以及机器主机名有效。
+
+若要让证书对客户端连接的地址（例如端口映射后的公网 IP）有效，将其作为 SAN 传入：
 
 ```bash
-openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=localhost"
+./target/release/impulse-server --tls-san 203.0.113.45
 ```
+
+可多次使用 `--tls-san` 指定多个名称/IP。要使用自己的证书，显式传入：
+
+```bash
+./target/release/impulse-server --tls-cert cert.pem --tls-key key.pem
+```
+
+### 信任自签名证书
+
+自签名证书会对流量加密，但客户端默认不信任它，会以 `CertificateUnknown` 拒绝。测试时可关闭客户端的证书校验（`danger_accept_invalid_certs` / `ssl_verify=false`）——流量仍被加密，但存在 MITM 风险。正式使用请二选一：
+
+- 将生成的 `cert.pem` 分发给客户端，并固定/信任该特定证书（加入系统信任库，或在客户端中配置信任该证书）；或
+- 获取 CA 签名的证书（如 Let's Encrypt，需域名）。
 
 生产环境请使用真实证书（如 Let's Encrypt）。私钥须为 PKCS8/SEC1 PEM 格式。
 

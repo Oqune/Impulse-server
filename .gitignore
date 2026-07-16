@@ -11,3 +11,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# TLS keys/certs (auto-generated or provided secrets — never commit)
+cert.pem
+key.pem
+*.pem
