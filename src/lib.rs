@@ -715,6 +715,9 @@ fn generate_self_signed_cert(
     {
         sans.push(SanType::DnsName(ia5));
     }
+    for iface in if_addrs::get_if_addrs().into_iter().flatten() {
+        sans.push(SanType::IpAddress(iface.ip()));
+    }
     for san in extra_sans {
         if let Ok(ip) = san.parse::<std::net::IpAddr>() {
             sans.push(SanType::IpAddress(ip));
