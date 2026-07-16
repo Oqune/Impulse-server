@@ -22,6 +22,12 @@ pub struct CliArgs {
 pub struct ServerSettings {
     pub address: String,
     pub password: String,
+    #[serde(default = "default_auth_message")]
+    pub auth_message: String,
+}
+
+fn default_auth_message() -> String {
+    "Authentication successful".to_string()
 }
 
 impl Default for ServerSettings {
@@ -29,12 +35,14 @@ impl Default for ServerSettings {
         Self {
             address: "0.0.0.0:8087".to_string(),
             password: "your_secure_password_here".to_string(),
+            auth_message: default_auth_message(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
+    #[serde(default)]
     pub server: ServerSettings,
 }
 

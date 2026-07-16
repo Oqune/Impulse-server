@@ -4,7 +4,7 @@ pub mod console;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use bcrypt::{hash, verify, DEFAULT_COST};
@@ -14,6 +14,24 @@ const MAX_CLIENTS: usize = 100;
 const MAX_MSG_SIZE: usize = 4096;
 const CHANNEL_CAP: usize = 16;
 const MAX_NAME_LEN: usize = 32;
+const HEARTBEAT_INTERVAL_SECS: u64 = 30;
+const CLIENT_TIMEOUT_SECS: u64 = 60;
+
+fn log_debug(component: &str, msg: &str) {
+    crate::console::log(crate::console::LogLevel::Debug, component, msg);
+}
+
+fn log_info(component: &str, msg: &str) {
+    crate::console::log(crate::console::LogLevel::Info, component, msg);
+}
+
+fn log_warn(component: &str, msg: &str) {
+    crate::console::log(crate::console::LogLevel::Warning, component, msg);
+}
+
+fn log_error(component: &str, msg: &str) {
+    crate::console::log(crate::console::LogLevel::Error, component, msg);
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
@@ -49,6 +67,10 @@ pub struct AuthResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,43 +97,58 @@ pub struct ErrorMessage {
 #[derive(Debug)]
 pub struct ClientInfo {
     pub id: u32,
+    pub name: String,
     pub sender: tokio::sync::mpsc::Sender<Message>,
+    pub last_seen: Arc<Mutex<std::time::Instant>>,
 }
 
 type ClientsMap = Arc<Mutex<HashMap<u32, ClientInfo>>>;
 
-#[derive(Debug, Clone)]
-pub struct ServerConfig {
-    pub address: String,
-    pub password: String,
+/// Allocates client IDs from a free-list, reusing IDs of disconnected clients.
+struct ClientIdPool {
+    next: u32,
+    free: VecDeque<u32>,
 }
 
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            address: "0.0.0.0:8087".to_string(),
-            password: "your_secure_password_here".to_string(),
+impl ClientIdPool {
+    fn new() -> Self {
+        Self { next: 1, free: VecDeque::new() }
+    }
+
+    fn acquire(&mut self) -> Option<u32> {
+        if let Some(id) = self.free.pop_front() {
+            return Some(id);
         }
+        if self.next == u32::MAX {
+            return None;
+        }
+        let id = self.next;
+        self.next += 1;
+        Some(id)
+    }
+
+    fn release(&mut self, id: u32) {
+        self.free.push_back(id);
     }
 }
 
 pub struct WsServer {
-    config: ServerConfig,
+    config: config::ServerSettings,
     clients: ClientsMap,
-    client_id_counter: Arc<Mutex<u32>>,
+    id_pool: Arc<Mutex<ClientIdPool>>,
     shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl WsServer {
     pub fn new() -> Self {
-        Self::with_config(ServerConfig::default())
+        Self::with_config(config::ServerSettings::default())
     }
 
-    pub fn with_config(config: ServerConfig) -> Self {
+    pub fn with_config(config: config::ServerSettings) -> Self {
         Self {
             config,
             clients: Arc::new(Mutex::new(HashMap::new())),
-            client_id_counter: Arc::new(Mutex::new(0u32)),
+            id_pool: Arc::new(Mutex::new(ClientIdPool::new())),
             shutdown_tx: None,
         }
     }
@@ -150,21 +187,14 @@ impl WsServer {
 
     pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind(&self.config.address).await?;
-        crate::console::log(
-            crate::console::LogLevel::Info,
-            "SERVER",
-            &format!("WebSocket server listening on {}", self.config.address),
-        );
+        log_info("SERVER", &format!("WebSocket server listening on {}", self.config.address));
 
         let hashed_password = hash(&self.config.password, DEFAULT_COST)?;
-        crate::console::log(
-            crate::console::LogLevel::Info,
-            "SERVER",
-            "Authentication enabled",
-        );
+        log_info("SERVER", "Authentication enabled");
 
         let clients = self.clients.clone();
-        let client_id_counter = self.client_id_counter.clone();
+        let id_pool = self.id_pool.clone();
+        let auth_message = self.config.auth_message.clone();
 
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
         self.shutdown_tx = Some(shutdown_tx);
@@ -173,23 +203,25 @@ impl WsServer {
             tokio::select! {
                 result = listener.accept() => {
                     match result {
-                        Ok((stream, _addr)) => {
+                        Ok((stream, addr)) => {
+                            log_debug("SERVER", &format!("New connection from {}", addr));
                             let clients = clients.clone();
-                            let client_id_counter = client_id_counter.clone();
+                            let id_pool = id_pool.clone();
                             let hashed_password = hashed_password.clone();
+                            let auth_message = auth_message.clone();
 
                             tokio::spawn(async move {
-                                handle_client(stream, client_id_counter, clients, hashed_password).await;
+                                handle_client(stream, id_pool, clients, hashed_password, auth_message).await;
                             });
                         }
                         Err(e) => {
-                            crate::console::log(crate::console::LogLevel::Error, "SERVER", &format!("Accept error: {}", e));
+                            log_error("SERVER", &format!("Accept error: {}", e));
                         }
                     }
                 }
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
-                        crate::console::log(crate::console::LogLevel::Info, "SERVER", "Shutdown signal received");
+                        log_info("SERVER", "Shutdown signal received");
                         break;
                     }
                 }
@@ -247,23 +279,30 @@ async fn send_error(ws_tx: &mut (impl SinkExt<Message> + Unpin), code: u16, mess
 
 async fn handle_client(
     stream: tokio::net::TcpStream,
-    client_id_counter: Arc<Mutex<u32>>,
+    id_pool: Arc<Mutex<ClientIdPool>>,
     clients: ClientsMap,
     hashed_password: String,
+    auth_success_message: String,
 ) {
     let client_id = {
-        let mut counter = client_id_counter.lock().await;
-        if *counter >= u32::MAX - 1 {
-            return;
+        let mut pool = id_pool.lock().await;
+        match pool.acquire() {
+            Some(id) => id,
+            None => {
+                log_warn("WS", "Client ID pool exhausted");
+                return;
+            }
         }
-        *counter += 1;
-        *counter
     };
+
+    let peer_addr = stream.peer_addr().ok();
+    log_debug("WS", &format!("Client {} connecting from {:?}", client_id, peer_addr));
 
     let ws_stream = match tokio_tungstenite::accept_async(stream).await {
         Ok(s) => s,
-        Err(_) => {
-            crate::console::log(crate::console::LogLevel::Error, "WS", &format!("Handshake error: client {}", client_id));
+        Err(e) => {
+            log_error("WS", &format!("Handshake error for client {}: {}", client_id, e));
+            id_pool.lock().await.release(client_id);
             return;
         }
     };
@@ -271,9 +310,30 @@ async fn handle_client(
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
     let auth_message = match ws_rx.next().await {
-        Some(Ok(Message::Text(text))) => text,
-        _ => {
+        Some(Ok(Message::Text(text))) => {
+            log_debug("WS", &format!("Client {} auth payload: {}", client_id, text));
+            text
+        }
+        Some(Ok(Message::Binary(_))) => {
+            log_warn("WS", &format!("Client {} sent binary instead of auth text", client_id));
             let _ = ws_tx.send(Message::Close(None)).await;
+            id_pool.lock().await.release(client_id);
+            return;
+        }
+        Some(Ok(Message::Close(_))) | None => {
+            log_debug("WS", &format!("Client {} disconnected before auth", client_id));
+            id_pool.lock().await.release(client_id);
+            return;
+        }
+        Some(Err(e)) => {
+            log_error("WS", &format!("Client {} receive error during auth: {}", client_id, e));
+            id_pool.lock().await.release(client_id);
+            return;
+        }
+        _ => {
+            log_warn("WS", &format!("Client {} unexpected message type during auth", client_id));
+            let _ = ws_tx.send(Message::Close(None)).await;
+            id_pool.lock().await.release(client_id);
             return;
         }
     };
@@ -282,31 +342,46 @@ async fn handle_client(
     let authenticated = match serde_json::from_str::<Envelope>(&auth_message) {
         Ok(env) if env.version == 1 => match env.body {
             MessageBody::Auth(req) => {
+                log_debug("WS", &format!("Client {} auth attempt: name={}", client_id, req.name));
                 match verify(&req.password, &hashed_password) {
                     Ok(valid) => {
                         if valid {
                             client_name = sanitize_name(&req.name);
                         }
+                        log_info("WS", &format!("Client {} auth result: {} (name={})", client_id, if valid { "success" } else { "failed" }, client_name));
                         valid
                     }
-                    Err(_) => false,
+                    Err(e) => {
+                        log_error("WS", &format!("Client {} bcrypt verify error: {}", client_id, e));
+                        false
+                    }
                 }
             }
-            _ => false,
+            _ => {
+                log_warn("WS", &format!("Client {} invalid auth message type", client_id));
+                false
+            }
         }
-        _ => false,
+        Ok(_) => {
+            log_warn("WS", &format!("Client {} bad protocol version", client_id));
+            false
+        }
+        Err(e) => {
+            log_warn("WS", &format!("Client {} invalid JSON in auth: {}", client_id, e));
+            false
+        }
     };
 
     if !authenticated {
         let _ = ws_tx.send(Message::Close(None)).await;
-        crate::console::log(crate::console::LogLevel::Warning, "WS", &format!("Auth failed: client {}", client_id));
+        id_pool.lock().await.release(client_id);
         return;
     }
 
     let auth_response = make_envelope(MessageBody::AuthResult(AuthResult {
         success: true,
         client_id,
-        message: "Аутентификация успешна".to_string(),
+        message: auth_success_message,
     }));
 
     if let Ok(json_msg) = serde_json::to_string(&auth_response) {
@@ -314,17 +389,20 @@ async fn handle_client(
     }
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(CHANNEL_CAP);
+    let last_seen = Arc::new(Mutex::new(std::time::Instant::now()));
 
     {
         let mut clients_map = clients.lock().await;
-        if clients_map.len() >= MAX_CLIENTS {
+        let current_count = clients_map.len();
+        if current_count >= MAX_CLIENTS {
             drop(clients_map);
             send_error(&mut ws_tx, 429, "Server full").await;
-            crate::console::log(crate::console::LogLevel::Warning, "WS", &format!("Rejected: server full, client {}", client_id));
+            log_warn("WS", &format!("Rejected client {}: server full ({}/{})", client_id, current_count, MAX_CLIENTS));
+            id_pool.lock().await.release(client_id);
             return;
         }
-        clients_map.insert(client_id, ClientInfo { id: client_id, sender: tx });
-        crate::console::log(crate::console::LogLevel::Info, "WS", &format!("Client {} ({}) connected", client_id, client_name));
+        clients_map.insert(client_id, ClientInfo { id: client_id, name: client_name.clone(), sender: tx, last_seen: last_seen.clone() });
+        log_info("WS", &format!("Client {} ({}) connected [total: {}]", client_id, client_name, clients_map.len()));
     }
 
     let event = make_envelope(MessageBody::Event(EventMessage {
@@ -336,55 +414,109 @@ async fn handle_client(
         broadcast_raw_message(&clients, &json_msg, Some(client_id)).await;
     }
 
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+    let mut last_pong = std::time::Instant::now();
+
     loop {
         tokio::select! {
             msg = rx.recv() => {
                 match msg {
                     Some(message) => {
                         if let Err(e) = ws_tx.send(message).await {
-                            crate::console::log(crate::console::LogLevel::Error, "WS", &format!("Send error: client {}, {}", client_id, e));
+                            log_error("WS", &format!("Send error for client {}: {}", client_id, e));
                             break;
                         }
                     }
-                    None => break,
+                    None => {
+                        log_debug("WS", &format!("Client {} rx channel closed", client_id));
+                        break;
+                    }
                 }
+            }
+            _ = heartbeat.tick() => {
+                if last_pong.elapsed() > std::time::Duration::from_secs(CLIENT_TIMEOUT_SECS) {
+                    log_warn("WS", &format!("Client {} timed out (no pong)", client_id));
+                    let _ = ws_tx.send(Message::Close(None)).await;
+                    break;
+                }
+                let _ = ws_tx.send(Message::Ping(Vec::new().into())).await;
             }
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        *last_seen.lock().await = std::time::Instant::now();
+                        log_debug("WS", &format!("Client {} recv: {}", client_id, text));
                         if text.len() > MAX_MSG_SIZE {
-                            crate::console::log(crate::console::LogLevel::Warning, "WS", &format!("Message too large: client {}", client_id));
+                            log_warn("WS", &format!("Message too large from client {}: {} bytes", client_id, text.len()));
                             continue;
                         }
                         match serde_json::from_str::<Envelope>(&text) {
                             Ok(env) if env.version == 1 => match env.body {
                                 MessageBody::Chat(chat) => {
+                                    log_debug("WS", &format!("Client {} chat: {} bytes", client_id, chat.content.len()));
+                                    let clients_map = clients.lock().await;
+                                    let sender_name = clients_map.get(&client_id)
+                                        .map(|c| c.name.clone())
+                                        .unwrap_or_else(|| "Unknown".to_string());
+                                    drop(clients_map);
                                     let server_msg = make_envelope(MessageBody::Chat(ChatMessage {
                                         content: chat.content,
+                                        sender_id: Some(client_id),
+                                        sender_name: Some(sender_name),
                                     }));
                                     broadcast_message(&clients, &server_msg, Some(client_id)).await;
                                 }
-                                MessageBody::Error(_) => {}
-                                _ => {}
+                                MessageBody::Error(err) => {
+                                    log_warn("WS", &format!("Client {} sent error: code={} msg={}", client_id, err.code, err.message));
+                                }
+                                MessageBody::Auth(_) => {
+                                    log_warn("WS", &format!("Client {} sent duplicate auth", client_id));
+                                }
+                                MessageBody::Event(_) => {
+                                    log_warn("WS", &format!("Client {} sent event (not allowed)", client_id));
+                                }
+                                MessageBody::AuthResult(_) => {
+                                    log_warn("WS", &format!("Client {} sent auth_result (not allowed)", client_id));
+                                }
                             },
                             Ok(_) => {
-                                crate::console::log(crate::console::LogLevel::Warning, "WS", &format!("Bad protocol version: client {}", client_id));
+                                log_warn("WS", &format!("Bad protocol version from client {}", client_id));
                             }
-                            Err(_) => {
-                                crate::console::log(crate::console::LogLevel::Warning, "WS", &format!("Bad JSON: client {}", client_id));
+                            Err(e) => {
+                                log_warn("WS", &format!("Bad JSON from client {}: {}", client_id, e));
                             }
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Err(e)) => {
-                        crate::console::log(crate::console::LogLevel::Error, "WS", &format!("Receive error: client {}, {}", client_id, e));
+                    Some(Ok(Message::Close(reason))) => {
+                        log_info("WS", &format!("Client {} close frame: {:?}", client_id, reason));
                         break;
                     }
-                    _ => {}
+                    Some(Ok(Message::Ping(data))) => {
+                        log_debug("WS", &format!("Client {} ping: {} bytes", client_id, data.len()));
+                        let _ = ws_tx.send(Message::Pong(data)).await;
+                    }
+                    Some(Ok(Message::Pong(_))) => {
+                        log_debug("WS", &format!("Client {} pong", client_id));
+                        last_pong = std::time::Instant::now();
+                    }
+                    Some(Ok(Message::Binary(data))) => {
+                        log_debug("WS", &format!("Client {} binary: {} bytes", client_id, data.len()));
+                    }
+                    Some(Ok(Message::Frame(_))) => {}
+                    Some(Err(e)) => {
+                        log_error("WS", &format!("Receive error for client {}: {}", client_id, e));
+                        break;
+                    }
+                    None => {
+                        log_debug("WS", &format!("Client {} stream ended", client_id));
+                        break;
+                    }
                 }
             }
         }
     }
+
+    log_info("WS", &format!("Client {} ({}) disconnecting", client_id, client_name));
 
     let leave = make_envelope(MessageBody::Event(EventMessage {
         kind: EventKind::Left,
@@ -398,8 +530,10 @@ async fn handle_client(
     {
         let mut clients_map = clients.lock().await;
         clients_map.remove(&client_id);
-        crate::console::log(crate::console::LogLevel::Info, "WS", &format!("Client {} ({}) disconnected", client_id, client_name));
+        log_info("WS", &format!("Client {} ({}) disconnected [remaining: {}]", client_id, client_name, clients_map.len()));
     }
+
+    id_pool.lock().await.release(client_id);
 }
 
 async fn broadcast_message(clients: &ClientsMap, message: &Envelope, exclude_id: Option<u32>) {
@@ -409,11 +543,18 @@ async fn broadcast_message(clients: &ClientsMap, message: &Envelope, exclude_id:
 }
 
 async fn broadcast_raw_message(clients: &ClientsMap, message: &str, exclude_id: Option<u32>) {
-    let clients_map = clients.lock().await;
-    for (_, client_info) in clients_map.iter() {
-        if let Some(exclude) = exclude_id && client_info.id == exclude {
+    let mut clients_map = clients.lock().await;
+    let mut dead: Vec<u32> = Vec::new();
+    for (id, client_info) in clients_map.iter() {
+        if exclude_id == Some(*id) {
             continue;
         }
-        let _ = client_info.sender.send(Message::Text(message.to_string().into())).await;
+        if client_info.sender.send(Message::Text(message.to_string().into())).await.is_err() {
+            dead.push(*id);
+        }
+    }
+    for id in dead {
+        log_warn("WS", &format!("Removing dead client {}", id));
+        clients_map.remove(&id);
     }
 }

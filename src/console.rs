@@ -39,7 +39,13 @@ impl Timestamp {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
         let t = now.as_secs();
-        format!("{:02}:{:02}:{:02}", (t / 3600) % 24, (t / 60) % 60, t % 60)
+        format!(
+            "{:02}:{:02}:{:02}.{:03}",
+            (t / 3600) % 24,
+            (t / 60) % 60,
+            t % 60,
+            now.subsec_millis()
+        )
     }
 }
 
