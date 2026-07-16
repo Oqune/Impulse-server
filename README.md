@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)]()
 
-WebSocket chat server with bcrypt authentication.
+Secure WebSocket (WSS) chat server with bcrypt authentication. TLS is mandatory.
 
 </div>
 
@@ -17,15 +17,29 @@ WebSocket chat server with bcrypt authentication.
 
 ```bash
 cargo build --release
-./target/release/impulse-server
+./target/release/impulse-server --tls-cert cert.pem --tls-key key.pem
 ```
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--host` | | Listen address | `0.0.0.0` |
-| `--port` | `-p` | Port | `8087` |
+| `--port` | `-p` | TLS listen port (WSS) | `8443` |
 | `--password` | `-P` | Server password | `your_secure_password_here` |
 | `--no-color` | | Disable ANSI colors | `false` |
+| `--tls-cert` | | Path to TLS certificate (PEM) | `cert.pem` |
+| `--tls-key` | | Path to TLS private key (PEM) | `key.pem` |
+
+The server listens **only** on a secure `wss://` endpoint. A plain (unencrypted) `ws://` listener is not provided — TLS is required for the connection.
+
+## Certificate
+
+Provide a PEM certificate/key pair. For local testing, generate a self-signed one:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=localhost"
+```
+
+In production use a real certificate (e.g. Let's Encrypt). The private key must be in PKCS8/SEC1 PEM format.
 
 ## Protocol
 
@@ -47,31 +61,15 @@ Example `chat` broadcast (server → clients):
 
 ## Security
 
+- Mandatory TLS (WSS) transport
 - Mandatory password, bcrypt (`DEFAULT_COST`)
 - Max 100 clients
 - 4 KB message limit (per frame, UTF-8 bytes)
 - Username sanitization (≤32 chars, control/`"`/`\` stripped)
 - Bounded channel (16 msgs/client)
-- Client ID counter overflow guard
-
-## TLS
-
-TLS is an optional feature (not wired to a listener yet):
-
-```bash
-cargo build --release --features tls
-```
-
-## Known limitations
-
-- No `LICENSE` file was shipped despite the MIT badge (now added).
-- Historically `ServerConfig` (lib.rs) and `AppConfig`/`ServerSettings` (config.rs) duplicated settings; now `config::ServerSettings` is the single source.
-- Dead connections are pruned: a failed `send` removes the client from the map.
-- Heartbeat (ping every 30s, 60s timeout) now disconnects unresponsive sockets.
-- `Ctrl+C` / `SIGTERM` trigger a graceful shutdown via `WsServer::shutdown()`.
-- `client_id` is reused from a free-list after disconnect.
-- `auth_result.message` is configurable (`server.auth_message`, defaults to English).
-- TLS is an optional feature (not yet wired to a listener).
+- Client ID reuse from a free-list after disconnect
+- Heartbeat (ping every 30s, 60s timeout) drops unresponsive sockets
+- `Ctrl+C` / `SIGTERM` triggers a graceful shutdown
 
 ## License
 

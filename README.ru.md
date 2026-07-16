@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)]()
 
-WebSocket-чат сервер с bcrypt-аутентификацией.
+Защищённый WebSocket (WSS) чат-сервер с bcrypt-аутентификацией. TLS обязателен.
 
 </div>
 
@@ -17,15 +17,29 @@ WebSocket-чат сервер с bcrypt-аутентификацией.
 
 ```bash
 cargo build --release
-./target/release/impulse-server
+./target/release/impulse-server --tls-cert cert.pem --tls-key key.pem
 ```
 
 | Флаг | Short | Описание | Default |
 |------|-------|----------|---------|
 | `--host` | | Адрес прослушивания | `0.0.0.0` |
-| `--port` | `-p` | Порт | `8087` |
+| `--port` | `-p` | TLS-порт (WSS) | `8443` |
 | `--password` | `-P` | Пароль сервера | `your_secure_password_here` |
 | `--no-color` | | Отключить цвета | `false` |
+| `--tls-cert` | | Путь к TLS-сертификату (PEM) | `cert.pem` |
+| `--tls-key` | | Путь к TLS-приватному ключу (PEM) | `key.pem` |
+
+Сервер слушает **только** защищённую `wss://` конечную точку. Обычный нешифрованный `ws://` listener не предусмотрен — TLS обязателен для подключения.
+
+## Сертификат
+
+Укажите пару сертификат/ключ в формате PEM. Для локальных тестов сгенерируйте самоподписанный:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=localhost"
+```
+
+В продакшене используйте реальный сертификат (например, Let's Encrypt). Приватный ключ должен быть в формате PKCS8/SEC1 PEM.
 
 ## Протокол
 
@@ -47,31 +61,15 @@ cargo build --release
 
 ## Безопасность
 
+- Обязательный TLS-транспорт (WSS)
 - Пароль обязателен, bcrypt (`DEFAULT_COST`)
 - Макс. 100 клиентов
 - Лимит 4 КБ/сообщение (на фрейм, UTF-8 байты)
 - Имена: санитизация, ≤32 символа (убираются control/`"`/`\`)
 - Ограниченный канал (16 сообщений/клиент)
-- Защита от переполнения счётчика ID клиентов
-
-## TLS
-
-TLS — опциональный feature (пока не подключён к слушателю):
-
-```bash
-cargo build --release --features tls
-```
-
-## Известные недостатки
-
-- Файл `LICENSE` не поставлялся при MIT-бейдже (теперь добавлен).
-- Ранее `ServerConfig` (lib.rs) и `AppConfig`/`ServerSettings` (config.rs) дублировали настройки; теперь единый источник — `config::ServerSettings`.
-- Мёртвые соединения очищаются: неудачный `send` удаляет клиента из map.
-- Heartbeat (ping каждые 30с, таймаут 60с) отключает неотвечающие сокеты.
-- `Ctrl+C` / `SIGTERM` инициируют корректную остановку через `WsServer::shutdown()`.
-- `client_id` переиспользуется из свободного списка после отключения.
-- `auth_result.message` настраивается (`server.auth_message`, по умолчанию английский).
-- TLS — опциональный feature (пока не подключён к слушателю).
+- `client_id` переиспользуется из свободного списка после отключения
+- Heartbeat (ping каждые 30с, таймаут 60с) отключает неотвечающие сокеты
+- `Ctrl+C` / `SIGTERM` инициируют корректную остановку
 
 ## Лицензия
 

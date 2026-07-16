@@ -13,7 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut server = WsServer::with_config(app_config.server.clone());
 
-    log(LogLevel::Info, "SERVER", &format!("Starting on {}", server.address()));
+    log(LogLevel::Info, "SERVER", &format!("Starting secure (WSS) on {}", server.address()));
     println!();
 
     tokio::select! {

@@ -1,7 +1,7 @@
 pub mod config;
 pub mod console;
 
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::{HashMap, VecDeque};
@@ -9,6 +9,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use bcrypt::{hash, verify, DEFAULT_COST};
 use serde::{Deserialize, Serialize};
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::server::TlsStream;
 
 const MAX_CLIENTS: usize = 100;
 const MAX_MSG_SIZE: usize = 4096;
@@ -137,6 +139,7 @@ pub struct WsServer {
     clients: ClientsMap,
     id_pool: Arc<Mutex<ClientIdPool>>,
     shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
+    tls_acceptor: TlsAcceptor,
 }
 
 impl WsServer {
@@ -145,11 +148,18 @@ impl WsServer {
     }
 
     pub fn with_config(config: config::ServerSettings) -> Self {
+        let tls_acceptor = load_tls_acceptor(&config)
+            .unwrap_or_else(|e| {
+                log_error("SERVER", &format!("Failed to load TLS certificate: {}", e));
+                std::process::exit(1);
+            });
+
         Self {
             config,
             clients: Arc::new(Mutex::new(HashMap::new())),
             id_pool: Arc::new(Mutex::new(ClientIdPool::new())),
             shutdown_tx: None,
+            tls_acceptor,
         }
     }
 
@@ -187,7 +197,7 @@ impl WsServer {
 
     pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind(&self.config.address).await?;
-        log_info("SERVER", &format!("WebSocket server listening on {}", self.config.address));
+        log_info("SERVER", &format!("Secure WebSocket (WSS) listening on {}", self.config.address));
 
         let hashed_password = hash(&self.config.password, DEFAULT_COST)?;
         log_info("SERVER", "Authentication enabled");
@@ -195,23 +205,32 @@ impl WsServer {
         let clients = self.clients.clone();
         let id_pool = self.id_pool.clone();
         let auth_message = self.config.auth_message.clone();
+        let acceptor = self.tls_acceptor.clone();
 
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
         self.shutdown_tx = Some(shutdown_tx);
 
         loop {
             tokio::select! {
-                result = listener.accept() => {
-                    match result {
+                accept = listener.accept() => {
+                    match accept {
                         Ok((stream, addr)) => {
-                            log_debug("SERVER", &format!("New connection from {}", addr));
+                            log_debug("SERVER", &format!("New secure connection from {}", addr));
+                            let acceptor = acceptor.clone();
                             let clients = clients.clone();
                             let id_pool = id_pool.clone();
                             let hashed_password = hashed_password.clone();
                             let auth_message = auth_message.clone();
 
                             tokio::spawn(async move {
-                                handle_client(stream, id_pool, clients, hashed_password, auth_message).await;
+                                match acceptor.accept(stream).await {
+                                    Ok(tls_stream) => {
+                                        handle_client(tls_stream, addr, id_pool, clients, hashed_password, auth_message).await;
+                                    }
+                                    Err(e) => {
+                                        log_error("WS", &format!("TLS handshake error from {}: {}", addr, e));
+                                    }
+                                }
                             });
                         }
                         Err(e) => {
@@ -278,7 +297,8 @@ async fn send_error(ws_tx: &mut (impl SinkExt<Message> + Unpin), code: u16, mess
 }
 
 async fn handle_client(
-    stream: tokio::net::TcpStream,
+    stream: TlsStream<TcpStream>,
+    peer_addr: std::net::SocketAddr,
     id_pool: Arc<Mutex<ClientIdPool>>,
     clients: ClientsMap,
     hashed_password: String,
@@ -295,7 +315,6 @@ async fn handle_client(
         }
     };
 
-    let peer_addr = stream.peer_addr().ok();
     log_debug("WS", &format!("Client {} connecting from {:?}", client_id, peer_addr));
 
     let ws_stream = match tokio_tungstenite::accept_async(stream).await {
@@ -534,6 +553,29 @@ async fn handle_client(
     }
 
     id_pool.lock().await.release(client_id);
+}
+
+fn load_tls_acceptor(config: &config::ServerSettings) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
+    let cert_path = &config.tls_cert;
+    let key_path = &config.tls_key;
+
+    let cert_file = std::fs::File::open(cert_path)
+        .map_err(|e| format!("Failed to open cert {}: {}", cert_path, e))?;
+    let key_file = std::fs::File::open(key_path)
+        .map_err(|e| format!("Failed to open key {}: {}", key_path, e))?;
+
+    let mut reader = std::io::BufReader::new(cert_file);
+    let certs: Vec<rustls::pki_types::CertificateDer> = rustls_pemfile::certs(&mut reader).collect::<Result<_, _>>()?;
+
+    let mut reader = std::io::BufReader::new(key_file);
+    let key = rustls_pemfile::private_key(&mut reader)?
+        .ok_or("No private key found in TLS key file")?;
+
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+
+    Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
 async fn broadcast_message(clients: &ClientsMap, message: &Envelope, exclude_id: Option<u32>) {
