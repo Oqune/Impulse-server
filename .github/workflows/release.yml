@@ -41,7 +41,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.85.0"
           targets: ${{ matrix.target }}
 
       - name: Install cross (Linux cross-targets)
@@ -70,4 +69,3 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.artifact }}
-          generate_release_notes: true
