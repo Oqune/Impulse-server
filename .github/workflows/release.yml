@@ -5,16 +5,14 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-
 env:
   CARGO_TERM_COLOR: always
   BIN: impulse-server
 
 jobs:
-  release:
-    name: Release (${{ matrix.os }})
+  # Native builds on each runner (fast, no emulation).
+  native:
+    name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -23,15 +21,9 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: impulse-server-linux-x64
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            artifact: impulse-server-linux-arm64
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact: impulse-server-macos-x64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact: impulse-server-macos-arm64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: impulse-server-windows-x64.exe
@@ -43,29 +35,84 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross (Linux cross-targets)
-        if: ${{ matrix.os == 'ubuntu-latest' && matrix.target == 'aarch64-unknown-linux-gnu' }}
-        run: cargo install cross --locked
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build (native)
-        if: ${{ !(matrix.os == 'ubuntu-latest' && matrix.target == 'aarch64-unknown-linux-gnu') }}
+      - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Build (cross)
-        if: ${{ matrix.os == 'ubuntu-latest' && matrix.target == 'aarch64-unknown-linux-gnu' }}
-        run: cross build --release --target ${{ matrix.target }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/${{ matrix.target }}/release/${{ env.BIN }}${{ endsWith(matrix.artifact, '.exe') && '.exe' || '' }}
+          if-no-files-found: error
 
-      - name: Prepare artifact (Unix)
-        if: ${{ matrix.os != 'windows-latest' }}
-        run: |
-          cp target/${{ matrix.target }}/release/${{ env.BIN }} ${{ matrix.artifact }}
-          chmod +x ${{ matrix.artifact }}
+  # Cross-compiled ARM64 binaries via `cargo-zigbuild` (works for
+  # Linux/macOS/Windows ARM64 from a single Linux runner).
+  cross:
+    name: Cross build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            artifact: impulse-server-linux-arm64
+          - target: aarch64-apple-darwin
+            artifact: impulse-server-macos-arm64
+          - target: aarch64-pc-windows-gnu
+            artifact: impulse-server-windows-arm64.exe
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Prepare artifact (Windows)
-        if: ${{ matrix.os == 'windows-latest' }}
-        run: cp target/${{ matrix.target }}/release/${{ env.BIN }}.exe ${{ matrix.artifact }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
-      - name: Upload to release
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Cross build release
+        run: cargo zigbuild --target ${{ matrix.target }} --release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/${{ matrix.target }}/release/${{ env.BIN }}${{ endsWith(matrix.artifact, '.exe') && '.exe' || '' }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [native, cross]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts
+
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.artifact }}
+          files: artifacts/*
+          generate_release_notes: true
