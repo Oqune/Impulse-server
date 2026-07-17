@@ -78,22 +78,22 @@ cargo build --release
 
 ## Platforms
 
-Impulse-server is written in portable Rust (edition 2024) and builds on any
-target with a working Rust toolchain and UDP/QUIC networking. The crypto provider
-(`ring`) requires an environment capable of its build (a C toolchain is provided
-by the Rust standard build for the targets below).
+Impulse-server is written in portable Rust (edition 2024) and builds on the
+targets below with a working Rust toolchain and UDP/QUIC networking. CI produces
+release binaries for Linux/macOS/Windows on both x86-64 and ARM64.
 
 | Platform | Target triple | Status | Notes |
 |----------|---------------|--------|-------|
 | Linux (x86-64) | `x86_64-unknown-linux-gnu` | ✅ Tested | Recommended for servers |
-| Linux (ARM64) | `aarch64-unknown-linux-gnu` | ✅ Builds | e.g. AWS Graviton, Raspberry Pi 4 (64-bit OS) |
-| macOS (Apple Silicon) | `aarch64-apple-darwin` | ✅ Builds | |
-| macOS (Intel) | `x86_64-apple-darwin` | ✅ Builds | |
-| Windows (x86-64) | `x86_64-pc-windows-msvc` | ✅ Tested | Runs as a console app; binds the UDP/QUIC port directly |
-| Windows (ARM64) | `aarch64-pc-windows-msvc` | ✅ Builds | |
-| FreeBSD / BSDs | `x86_64-unknown-freebsd` | ⚠️ Builds* | Not CI-tested |
+| Linux (ARM64) | `aarch64-unknown-linux-gnu` | ✅ Tested (CI) | e.g. AWS Graviton, Raspberry Pi 4 (64-bit OS) |
+| macOS (Apple Silicon) | `aarch64-apple-darwin` | ✅ Tested (CI) | |
+| macOS (Intel) | `x86_64-apple-darwin` | ✅ Tested (CI) | |
+| Windows (x86-64) | `x86_64-pc-windows-msvc` | ✅ Tested | Console app; binds the UDP/QUIC port directly |
+| Windows (ARM64) | `aarch64-pc-windows-gnu` | ✅ Tested (CI) | |
+| FreeBSD / BSDs | `x86_64-unknown-freebsd` | ⚠️ Manual only | The `aws-lc-sys` crypto backend has no FreeBSD sysroot under cross-tools; a native FreeBSD toolchain is required |
 
-\* Builds with the standard `ring` backend; no platform-specific code paths.
+Prebuilt binaries for every ✅ row (except FreeBSD) are attached to each
+GitHub Release.
 
 ### Requirements
 
