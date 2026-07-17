@@ -1,18 +1,36 @@
 # Rust build artifacts
 /target
+**/*.rs.bk
+
+# Generated certificate / key material (NEVER commit)
+cert_data/
+cert.pem
+key.pem
+*.pem
+*.key
+*.crt
+*.der
+
+# Runtime config that may contain secrets (keep the .example)
+config.toml
+
+# Logs
+*.log
+/logs/
+
+# Test / temp artifacts
+test_err.txt
+temp_*.log
+*.tmp
 
 # IDE / editor
 .idea/
 .vscode/
+*.swp
 
 # OS files
 .DS_Store
 Thumbs.db
 
-# Logs
-*.log
-
-# TLS keys/certs (auto-generated or provided secrets — never commit)
-cert.pem
-key.pem
-*.pem
+# RustRover / CLion shelved changes
+.shelf/

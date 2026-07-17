@@ -1,65 +1,67 @@
+//! Server configuration and CLI parsing.
+//!
+//! Configuration is resolved from (in increasing priority):
+//!   1. built-in defaults,
+//!   2. an optional `config.toml` next to the executable,
+//!   3. command-line flags (which always win when provided).
+
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "impulse-server")]
-#[command(about = "Secure WebSocket (WSS) chat server")]
+#[command(about = "Secure ephemeral messenger server over WebTransport (QUIC)")]
 pub struct CliArgs {
-    #[arg(long, default_value = "0.0.0.0")]
-    pub host: String,
+    #[arg(long, help = "Bind host (overrides config file)")]
+    pub host: Option<String>,
 
-    #[arg(short, long, default_value = "8443", help = "TLS listen port (WSS)")]
-    pub port: u16,
-
-    #[arg(short = 'P', long)]
-    pub password: Option<String>,
-
-    #[arg(long, help = "Disable colored output")]
-    pub no_color: bool,
+    #[arg(
+        short,
+        long,
+        help = "WebTransport (QUIC) listen port (overrides config file)"
+    )]
+    pub port: Option<u16>,
 
     #[arg(
         long,
-        default_value = "cert.pem",
-        help = "Path to TLS certificate (PEM)"
+        help = "Directory to store the generated certificate/key (overrides config file)"
     )]
-    pub tls_cert: String,
-
-    #[arg(
-        long,
-        default_value = "key.pem",
-        help = "Path to TLS private key (PEM)"
-    )]
-    pub tls_key: String,
+    pub cert_dir: Option<String>,
 
     #[arg(long, num_args = 0.., help = "Extra SAN (DNS name or IP) for the generated self-signed certificate")]
-    pub tls_san: Vec<String>,
+    pub san: Vec<String>,
+
+    #[arg(
+        long,
+        help = "Password hash (SHA-256 hex) for authentication (overrides config file)"
+    )]
+    pub password_hash: Option<String>,
+
+    #[arg(long, help = "Path to a TOML config file")]
+    pub config: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerSettings {
+    /// Socket address the WebTransport endpoint binds to, e.g. `0.0.0.0:4433`.
     pub address: String,
-    pub password: String,
-    #[serde(default = "default_auth_message")]
-    pub auth_message: String,
-    pub tls_cert: String,
-    pub tls_key: String,
+    /// Directory where the self-signed certificate + key are persisted.
+    pub cert_dir: String,
+    /// Extra Subject Alternative Names for the certificate.
     #[serde(default)]
-    pub tls_san: Vec<String>,
-}
-
-fn default_auth_message() -> String {
-    "Authentication successful".to_string()
+    pub san: Vec<String>,
+    /// Password hash for authentication (SHA-256 hex). Required.
+    pub password_hash: String,
 }
 
 impl Default for ServerSettings {
     fn default() -> Self {
         Self {
-            address: "0.0.0.0:8443".to_string(),
-            password: "your_secure_password_here".to_string(),
-            auth_message: default_auth_message(),
-            tls_cert: "cert.pem".to_string(),
-            tls_key: "key.pem".to_string(),
-            tls_san: Vec::new(),
+            address: "0.0.0.0:4433".to_string(),
+            cert_dir: "cert_data".to_string(),
+            san: Vec::new(),
+            // No insecure default; callers must supply a real hash.
+            password_hash: String::new(),
         }
     }
 }
@@ -70,37 +72,88 @@ pub struct AppConfig {
     pub server: ServerSettings,
 }
 
-/// Resolve a possibly-relative certificate/key path against the directory of
-/// the current executable, so that `cert.pem` placed next to the binary works
-/// regardless of the working directory the server is launched from.
-pub fn resolve_tls_path(path: &str) -> String {
-    let path_buf = std::path::Path::new(path);
-    if path_buf.is_absolute() {
-        return path.to_string();
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let resolved = dir.join(path_buf);
-        if let Some(s) = resolved.to_str() {
-            return s.to_string();
+impl AppConfig {
+    /// Validate that the resolved configuration is usable. Returns an error if a
+    /// required field (the password hash) is missing.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.server.password_hash.trim().is_empty() {
+            anyhow::bail!(
+                "no password hash configured: pass --password-hash <sha256-hex> or set \
+                 `server.password_hash` in config.toml"
+            );
         }
+        if self.server.password_hash.len() != 64
+            || !self
+                .server
+                .password_hash
+                .chars()
+                .all(|c| c.is_ascii_hexdigit())
+        {
+            anyhow::bail!(
+                "password_hash must be a 64-character lower/upper-case SHA-256 hex string, \
+                 got {} chars",
+                self.server.password_hash.len()
+            );
+        }
+        Ok(())
     }
-    path.to_string()
 }
 
-pub fn load_config(cli_args: &CliArgs) -> AppConfig {
-    let mut config = AppConfig::default();
+/// Resolve the effective configuration from a TOML file (if found) and CLI flags.
+pub fn load_config(cli_args: &CliArgs) -> anyhow::Result<AppConfig> {
+    let mut config = load_file_config(cli_args.config.as_deref()).unwrap_or_default();
 
-    config.server.address = format!("{}:{}", cli_args.host, cli_args.port);
-
-    if let Some(ref pwd) = cli_args.password {
-        config.server.password = pwd.clone();
+    if let Some(host) = &cli_args.host {
+        config.server.address = format!(
+            "{}:{}",
+            host,
+            current_port(&config.server.address, cli_args.port)
+        );
+    }
+    if let Some(port) = cli_args.port {
+        config.server.address = format!("{}:{}", current_host(&config.server.address), port);
+    }
+    if let Some(cert_dir) = &cli_args.cert_dir {
+        config.server.cert_dir = cert_dir.clone();
+    }
+    if !cli_args.san.is_empty() {
+        config.server.san = cli_args.san.clone();
+    }
+    if let Some(hash) = &cli_args.password_hash {
+        config.server.password_hash = hash.clone();
     }
 
-    config.server.tls_cert = resolve_tls_path(&cli_args.tls_cert);
-    config.server.tls_key = resolve_tls_path(&cli_args.tls_key);
-    config.server.tls_san = cli_args.tls_san.clone();
+    config.validate()?;
+    Ok(config)
+}
 
-    config
+fn current_host(address: &str) -> &str {
+    address
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or("0.0.0.0")
+}
+
+fn current_port(address: &str, cli_port: Option<u16>) -> u16 {
+    cli_port
+        .or_else(|| address.rsplit_once(':').and_then(|(_, p)| p.parse().ok()))
+        .unwrap_or(4433)
+}
+
+/// Load `config.toml` from the given path, or from next to the executable.
+fn load_file_config(path: Option<&str>) -> Option<AppConfig> {
+    let path = match path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => {
+            let exe = std::env::current_exe().ok()?;
+            let dir = exe.parent()?;
+            let candidate = dir.join("config.toml");
+            if !candidate.exists() {
+                return None;
+            }
+            candidate
+        }
+    };
+    let text = std::fs::read_to_string(&path).ok()?;
+    toml::from_str(&text).ok()
 }

@@ -1,13 +1,13 @@
 [package]
 name = "impulse-server"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2024"
-description = "Secure WebSocket (WSS) chat server with bcrypt authentication"
+description = "Secure ephemeral messenger server over WebTransport (QUIC) with TOFU trust-on-first-use"
 license = "MIT"
 authors = ["oqune"]
 repository = "https://github.com/oqune/impulse-server"
 readme = "README.md"
-keywords = ["websocket", "wss", "chat", "tls", "rust"]
+keywords = ["webtransport", "quic", "messenger", "tofu", "rust"]
 categories = ["network-programming"]
 
 [lib]
@@ -19,18 +19,48 @@ name = "Impulse-server"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1.0", features = ["full"] }
-tokio-tungstenite = { version = "0.28.0", features = ["tokio-rustls"] }
-tokio-rustls = "0.26"
+# WebTransport (QUIC/HTTP3) transport
+wtransport = { version = "0.7", features = ["quinn"] }
+
+# TLS / certificate generation
 rustls = "0.23"
-rustls-pemfile = "2.2"
-rcgen = "0.13"
-if-addrs = "0.13"
-futures-util = "0.3.0"
-bcrypt = "0.15.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-clap = { version = "4.4", features = ["derive"] }
+rustls-pki-types = "1.10"
+rcgen = "0.14"
+sha2 = "0.10"
+rand = "0.8"
+time = "0.3"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# TUI
+ratatui = "0.30"
+crossterm = "0.29"
+tui-qrcode = "0.2"
+qrcode = { version = "0.14", default-features = false }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Concurrency-friendly collections
+dashmap = "6"
+crossbeam-channel = "0.5"
+
+# Error handling
+anyhow = "1"
+
+# Hex encoding
+hex = "0.4"
+
+# Constant-time comparisons (password auth)
+subtle = "2.6"
+
+# CLI + config
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
 
 [profile.release]
 opt-level = 3

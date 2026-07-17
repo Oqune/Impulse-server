@@ -1,100 +1,164 @@
 <div align="center">
 
-[🇺🇸 **English**](README.md) | [🇷🇺 Русский](README.ru.md) | [🇨🇳 中文](README.zh.md)
+[🇺🇸 **English**](README.md) | [🇷🇺 Русский](README.ru.md)
 
 ![logo](logo.png)
 
 [![Rust](https://img.shields.io/badge/Rust-1.85%2B-darkblue?logo=rust)](https://www.rust-lang.org)
-[![WebSocket](https://img.shields.io/badge/WebSocket-tungstenite-green)](https://github.com/snapview/tokio-tungstenite)
+[![WebTransport](https://img.shields.io/badge/Transport-WebTransport%20%2F%20QUIC-green)](https://w3c.github.io/webtransport/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)]()
+[![CI](https://github.com/oqune/impulse-server/actions/workflows/ci.yml/badge.svg)](https://github.com/oqune/impulse-server/actions/workflows/ci.yml)
 
-Secure WebSocket (WSS) chat server with bcrypt authentication. TLS is mandatory.
+Secure, **ephemeral** messenger server over **WebTransport (QUIC)** with
+**TOFU** trust-on-first-use and password authentication.
 
 </div>
 
-## Run
+## Overview
+
+Impulse is a relay server for an end-to-end-encrypted messenger. The server
+**never sees plaintext** — clients encrypt message payloads locally and only
+hand the server opaque bytes, a sequence id, a timestamp, and a per-message
+public key. The server stores messages in RAM (TTL 72h), assigns monotonic
+ids, and broadcasts them to all connected clients.
+
+Key design points:
+
+- **Transport:** WebTransport over QUIC only (`wtransport` 0.7). TLS 1.3 is
+  mandatory; the old WSS transport was removed.
+- **Binary protocol:** length-prefixed binary frames with opcodes `0x01`–`0x08`
+  (little-endian), not JSON.
+- **Auth:** clients must send `Auth` with the password; the server verifies a
+  SHA-256 hash in constant time.
+- **TLS / Certificates:** self-signed **Ed25519** certificates, valid **14 days**,
+  rotated automatically with a **2-day overlap** window. The PEM material is
+  persisted under `cert_dir` (resolved relative to the executable, `0600` on
+  Unix).
+- **TOFU:** the server renders a QR code (right TUI panel) containing the
+  SHA-256 fingerprint of the DER certificate plus its issue timestamp. Clients
+  scan it, pin `serverCertificateHashes`, and trust the server on first use. On
+  rotation the new fingerprint is broadcast via `NewCertHash` (0x07).
+- **Storage:** in-RAM ring buffer, messages expire after 72h (`TTL`), bounded by
+  count (`10_000`) and per-payload size (`1 MB`).
+- **Relay:** broadcast to all active sessions; late joiners catch up via
+  `Sync { last_seen_id }`.
+- **Admin:** a **TUI** with three regions:
+  - **Server Info header** (top-left): bind address, transport
+    (`WebTransport/QUIC TLS1.3 (h3)`), crate version, SAN count, live
+    `sessions / MAX_SESSIONS`, stored message count, message TTL, max payload
+    size, certificate SHA-256 fingerprint (short), cert expiry countdown, and a
+    ⚠ rotating indicator during key overlap.
+  - **Logs** (bottom-left): live server log stream.
+  - **TOFU panel** (right, when the terminal is wide enough): a scannable QR
+    code containing the full grouped certificate fingerprint plus its issue time
+    and remaining validity.
+  `Ctrl+C` / `q` quits and shuts down gracefully.
+
+## Build & run
 
 ```bash
 cargo build --release
-./target/release/impulse-server --tls-cert cert.pem --tls-key key.pem
+./target/release/Impulse-server --config config.toml
+# or with CLI flags (which override the config file):
+./target/release/Impulse-server --port 4433 --cert-dir cert_data \
+    --password-hash $(printf 'yourpassword' | sha256sum | cut -d' ' -f1)
 ```
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--host` | | Listen address | `0.0.0.0` |
-| `--port` | `-p` | TLS listen port (WSS) | `8443` |
-| `--password` | `-P` | Server password | `your_secure_password_here` |
-| `--no-color` | | Disable ANSI colors | `false` |
-| `--tls-cert` | | Path to TLS certificate (PEM) | `cert.pem` |
-| `--tls-key` | | Path to TLS private key (PEM) | `key.pem` |
-| `--tls-san` | | Extra SAN (DNS/IP) for the auto-generated self-signed cert (repeatable) | _none_ |
+| `--host` | | Bind host (overrides config) | `0.0.0.0` |
+| `--port` | `-p` | WebTransport (QUIC) listen port | `4433` |
+| `--cert-dir` | | Directory for the generated certificate/key | `cert_data` |
+| `--san` | | Extra SAN (DNS name or IP) for the self-signed cert (repeatable) | _none_ |
+| `--password-hash` | | SHA-256 hex of the client password (required) | _none_ |
+| `--config` | | Path to a TOML config file | `./config.toml` |
 
-The server listens **only** on a secure `wss://` endpoint. A plain (unencrypted) `ws://` listener is not provided — TLS is required for the connection.
+`password_hash` is **required** — there is no insecure default. Generate it with
+`printf 'pw' | sha256sum`.
 
-## Certificate
+## Platforms
 
-If `cert.pem` / `key.pem` are missing next to the executable, the server
-**auto-generates a self-signed certificate** on first start. By default it is
-valid for `localhost`, `127.0.0.1` and the machine hostname.
+Impulse-server is written in portable Rust (edition 2024) and builds on any
+target with a working Rust toolchain and UDP/QUIC networking. The crypto provider
+(`ring`) requires an environment capable of its build (a C toolchain is provided
+by the Rust standard build for the targets below).
 
-To make the certificate valid for the address your clients connect to (e.g. a
-public IP behind port forwarding), pass it as a SAN:
+| Platform | Target triple | Status | Notes |
+|----------|---------------|--------|-------|
+| Linux (x86-64) | `x86_64-unknown-linux-gnu` | ✅ Tested | Recommended for servers |
+| Linux (ARM64) | `aarch64-unknown-linux-gnu` | ✅ Builds | e.g. AWS Graviton, Raspberry Pi 4 (64-bit OS) |
+| macOS (Apple Silicon) | `aarch64-apple-darwin` | ✅ Builds | |
+| macOS (Intel) | `x86_64-apple-darwin` | ✅ Builds | |
+| Windows (x86-64) | `x86_64-pc-windows-msvc` | ✅ Tested | Runs as a console app; binds the UDP/QUIC port directly |
+| Windows (ARM64) | `aarch64-pc-windows-msvc` | ✅ Builds | |
+| FreeBSD / BSDs | `x86_64-unknown-freebsd` | ⚠️ Builds* | Not CI-tested |
 
-```bash
-./target/release/impulse-server --tls-san 203.0.113.45
-```
+\* Builds with the standard `ring` backend; no platform-specific code paths.
 
-You can repeat `--tls-san` for multiple names/IPs. To use your own certificate
-instead, provide it explicitly:
+### Requirements
 
-```bash
-./target/release/impulse-server --tls-cert cert.pem --tls-key key.pem
-```
+- **Rust 1.85+** (edition 2024).
+- A **UDP-reachable** port (QUIC runs over UDP). Open/forward the configured
+  port in firewalls.
+- On **Unix**, the private key file is written with `0600` permissions
+  automatically; on Windows the ACL is left to the OS.
+- **Root/administrator is NOT required** — bind to a high port (e.g. `4433`)
+  instead of `443`. The QR/TOFU flow lets clients trust a self-signed cert,
+  so no public CA is needed.
 
-### Trusting the self-signed certificate
+## Protocol (binary, little-endian)
 
-A self-signed certificate encrypts traffic but is not trusted by clients out of
-the box, so they reject it with `CertificateUnknown`. For testing you can
-disable certificate validation on the client (e.g. `danger_accept_invalid_certs`
-/ `ssl_verify=false`) — this still encrypts, but allows MITM. For real use,
-either:
+All frames: `[opcode: u8][...fields]`. Length-prefixed blobs are `u32 len`
+followed by `len` bytes.
 
-- distribute the generated `cert.pem` to clients and pin/trust it (add it to the
-  OS trust store, or configure the client to trust that specific cert), or
-- obtain a CA-signed certificate (e.g. Let's Encrypt — requires a domain).
+| Opcode | Dir | Name | Fields |
+|--------|-----|------|--------|
+| `0x01` | C→S | Auth | `len`-prefixed password (UTF-8) |
+| `0x02` | S→C | AuthResult | `u8` status (`0`=ok, `1`=fail) + optional `len`-prefixed message |
+| `0x03` | C→S | Sync | `u64` last_seen_id |
+| `0x04` | S→C | SyncResponse | `u32` count, then per message: `u64 id`, `u64 ts`, `len`-prefixed payload |
+| `0x05` | C→S / S→C | Data | C→S: `len`-prefixed payload. S→C: `u64 id`, `u64 ts`, `len`-prefixed payload |
+| `0x06` | both | Heartbeat | `u64` client_timestamp (echoed back) |
+| `0x07` | S→C | NewCertHash | exactly 32 raw SHA-256 bytes + `u64` unix expiry |
+| `0x08` | C→S / S→C | KeyExchange | `len`-prefixed public key (relayed to other clients) |
 
-In production use a real certificate (e.g. Let's Encrypt). The private key must be in PKCS8/SEC1 PEM format.
-
-## Protocol
-
-Every frame is a JSON object with envelope fields `version` (`1`), `timestamp` (ms, Unix), and `type`.
-
-| Type | Direction | Fields |
-|------|-----------|--------|
-| `auth` | client → server | `name`, `password` |
-| `auth_result` | server → client | `success`, `client_id`, `message` |
-| `chat` | both | `content`, `sender_id?`, `sender_name?` |
-| `event` | server → client | `event` (`joined`/`left`), `user_id`, `user_name` |
-| `error` | server → client | `code`, `message` |
-
-Example `chat` broadcast (server → clients):
-
-```json
-{"version":1,"timestamp":1710000000000,"type":"chat","content":"hi","sender_id":3,"sender_name":"Alice"}
-```
+Unknown/invalid opcodes from a client close the connection. Idle streams are
+closed after 300s. Sessions are capped at 1024; oversized payloads (>1 MB) are
+dropped.
 
 ## Security
 
-- Mandatory TLS (WSS) transport
-- Mandatory password, bcrypt (`DEFAULT_COST`)
-- Max 100 clients
-- 4 KB message limit (per frame, UTF-8 bytes)
-- Username sanitization (≤32 chars, control/`"`/`\` stripped)
-- Bounded channel (16 msgs/client)
-- Client ID reuse from a free-list after disconnect
-- Heartbeat (ping every 30s, 60s timeout) drops unresponsive sockets
-- `Ctrl+C` / `SIGTERM` triggers a graceful shutdown
+- Mandatory QUIC/TLS 1.3 transport (WebTransport).
+- Short-lived Ed25519 certificates (14d) with automatic rotation (2d overlap);
+  the new cert is applied to the **live** TLS resolver (no restart) and
+  announced via `NewCertHash`.
+- TOFU fingerprint pinning via QR code + `NewCertHash` control packet.
+- Ephemeral RAM-only storage, 72h TTL, bounded ring buffer and payload size.
+- Constant-time password-hash comparison.
+- Private key file restricted to `0600` on Unix.
+- No plaintext, passwords, or payloads are logged.
+
+## Graceful shutdown
+
+`Ctrl+C` / `SIGTERM` (or `q` in the TUI) triggers a graceful shutdown: the
+endpoint stops accepting new sessions and active writers are drained. Logs are
+also written to `logs/impulse-server.log`.
+
+## Project layout
+
+```
+src/
+  cert.rs      — Ed25519 cert generation, rotation, SHA-256 TOFU fingerprint, FS persist
+  storage.rs   — ephemeral in-RAM message log (TTL 72h, sequence ids)
+  protocol.rs  — binary wire frames (opcodes 0x01–0x08)
+  server.rs    — WebTransport endpoint, session handling, broadcast relay
+  tui.rs       — terminal UI: Server Info header, log stream, TOFU QR / fingerprint panel
+  logging.rs   — tracing → TUI / file bridge
+  config.rs    — CLI + config.toml loading
+  lib.rs       — wiring + run() entry point
+  main.rs      — binary entry point
+  tests.rs     — unit tests (protocol + storage)
+```
 
 ## License
 

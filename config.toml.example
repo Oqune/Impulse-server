@@ -1,0 +1,17 @@
+# Impulse server configuration.
+# Copy to `config.toml` next to the executable, or pass `--config <path>`.
+# CLI flags always override values here.
+
+[server]
+# Socket address the WebTransport (QUIC) endpoint binds to.
+address = "0.0.0.0:4433"
+
+# Directory where the self-signed certificate + key are persisted (relative to exe).
+cert_dir = "cert_data"
+
+# Extra Subject Alternative Names for the generated certificate (DNS or IP).
+san = []
+
+# REQUIRED. SHA-256 (hex) of the client password. Generate with:
+#   printf 'yourpassword' | sha256sum
+password_hash = "ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f"
