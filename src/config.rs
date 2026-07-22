@@ -37,6 +37,12 @@ pub struct CliArgs {
     )]
     pub password_hash: Option<String>,
 
+    #[arg(
+        long,
+        help = "Compute SHA-256 hex of a password (prints to stdout and exits). Use this to generate the password_hash value."
+    )]
+    pub hash_password: Option<String>,
+
     #[arg(long, help = "Path to a TOML config file")]
     pub config: Option<String>,
 }
@@ -101,6 +107,11 @@ impl AppConfig {
 
 /// Resolve the effective configuration from a TOML file (if found) and CLI flags.
 pub fn load_config(cli_args: &CliArgs) -> anyhow::Result<AppConfig> {
+    if let Some(pw) = &cli_args.hash_password {
+        let hash = sha256_hex(pw);
+        println!("{hash}");
+        std::process::exit(0);
+    }
     let mut config = load_file_config(cli_args.config.as_deref()).unwrap_or_default();
 
     if let Some(host) = &cli_args.host {
@@ -138,6 +149,14 @@ fn current_port(address: &str, cli_port: Option<u16>) -> u16 {
     cli_port
         .or_else(|| address.rsplit_once(':').and_then(|(_, p)| p.parse().ok()))
         .unwrap_or(4433)
+}
+
+/// Helper: SHA-256 hex of a UTF-8 string (used by --hash-password).
+pub fn sha256_hex(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 /// Load `config.toml` from the given path, or from next to the executable.

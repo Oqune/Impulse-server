@@ -1,6 +1,8 @@
 //! Certificate management for the Impulse server.
 //!
-//! The server uses self-signed certificates with an **Ed25519** key pair.
+//! The server uses self-signed certificates with an **ECDSA P-256** key pair.
+//! Ed25519 is NOT used because Chromium's WebTransport stack (used by Android)
+//! does not support Ed25519 as a TLS 1.3 signature scheme.
 //! Certificates are short-lived (14 days) and rotated automatically with a
 //! 2-day overlap so that clients trusting the previous fingerprint keep working
 //! during the transition.
@@ -237,8 +239,10 @@ impl CertManager {
         }
         params.subject_alt_names = sans;
 
-        // Ed25519 key pair.
-        let key_pair = KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
+        // ECDSA P-256 key pair. Chromium's WebTransport (used by Android) does
+        // NOT support Ed25519 as a TLS 1.3 signature scheme, so we use P-256
+        // which is universally supported across all WebTransport clients.
+        let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
         let cert = params.self_signed(&key_pair)?;
 
         let der: CertificateDer<'static> = cert.der().clone();
@@ -258,7 +262,7 @@ impl CertManager {
             warn!("Failed to restrict private key permissions: {}", e);
         }
         info!(
-            "Generated new Ed25519 certificate (valid {}s, fp={})",
+            "Generated new ECDSA P-256 certificate (valid {}s, fp={})",
             not_after.unix_timestamp() - not_before.unix_timestamp(),
             &fingerprint[..16]
         );
@@ -381,11 +385,10 @@ impl CertManager {
     }
 }
 
-/// wtransport 0.7 bundles and uses the `ring` crypto provider by default; build
-/// against it so the keys we generate are loadable by the same provider rustls
-/// uses inside the QUIC stack.
+/// Post-quantum hybrid TLS key exchange (X25519Kyber768) via aws-lc-rs.
+/// wtransport 0.7 + rustls + aws-lc-rs handle the rest.
 pub(crate) fn default_crypto_provider() -> rustls::crypto::CryptoProvider {
-    rustls::crypto::ring::default_provider()
+    rustls::crypto::aws_lc_rs::default_provider()
 }
 
 /// A [`ResolvesServerCert`] whose backing certificate can be swapped at runtime.

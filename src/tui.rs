@@ -2,8 +2,8 @@
 //!
 //! A **horizontal** two-panel layout: the **left** panel shows live `tracing` log
 //! output with timestamps, the **right** panel shows a centered QR code containing
-//! the TOFU trust payload (certificate fingerprint + issue timestamp), the grouped
-//! fingerprint and a countdown to the next certificate rotation.
+//! the TOFU trust payload (`impulse-cert:<fingerprint>`), the grouped fingerprint
+//! and a countdown to the next certificate rotation.
 //!
 //! The TUI owns its own thread and communicates with the rest of the app via
 //! channels: log records flow in through a `crossbeam_channel`, and the current
@@ -16,6 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{self};
+use copypasta::{ClipboardContext, ClipboardProvider};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -31,19 +32,13 @@ const MAX_LOG_LINES: usize = 500;
 
 /// Preferred width of the right TOFU panel. The layout adapts gracefully when
 /// the terminal is smaller (see `draw`), so there is no minimum size.
-const TOFU_PANEL_WIDTH: u16 = 56;
+/// 72 cols fits the v4 QR code (`impulse-cert:<64-hex>` = 77 bytes → 33x33
+/// modules → 66 cols + quiet zone + borders).
+const TOFU_PANEL_WIDTH: u16 = 72;
 
 /// Below this terminal width we drop the TOFU panel entirely and show only
 /// logs, since there is not enough room for a readable QR code.
 const MIN_SPLIT_WIDTH: u16 = 40;
-
-/// Payload encoded into the TOFU QR code. A client scans this, checks the
-/// fingerprint matches `serverCertificateHashes`, and pins it.
-#[derive(Clone)]
-pub struct TofuPayload {
-    pub fingerprint: String,
-    pub issued_at: u64,
-}
 
 /// Snapshot of certificate state shown in the right panel.
 #[derive(Clone, Default)]
@@ -71,9 +66,10 @@ impl CertView {
         }
     }
 
-    /// The QR payload string: `impulse-tofu|<fp>|<issued_at>`.
+    /// The QR payload: `impulse-cert:<fp>` — the SHA-256 fingerprint the client
+    /// pins via WebTransport `serverCertificateHashes` (TOFU).
     pub fn tofu_qr_string(&self) -> String {
-        format!("impulse-tofu|{}|{}", self.fingerprint_raw, self.issued_at)
+        format!("impulse-cert:{}", self.fingerprint_raw)
     }
 }
 
@@ -165,9 +161,12 @@ pub fn run_tui(
 
     let mut logs: Vec<LogRecord> = Vec::with_capacity(MAX_LOG_LINES);
     let mut last_tick = std::time::Instant::now();
+    let mut last_copy: Option<SystemTime> = None;
+    let clipboard_result = ClipboardContext::new();
+    let has_clipboard = clipboard_result.is_ok();
+    let mut clipboard = clipboard_result.ok();
 
     loop {
-        // Drain new log lines (bounded).
         while let Ok(rec) = log_rx.try_recv() {
             logs.push(rec);
             if logs.len() > MAX_LOG_LINES {
@@ -176,23 +175,29 @@ pub fn run_tui(
             }
         }
 
-        // Refresh cert view (rotation may have changed it).
         let stats = (
             stats.0.load(Ordering::Relaxed),
             stats.1.load(Ordering::Relaxed),
         );
         let info = info.lock().unwrap().clone();
-        draw(&mut terminal, &logs, &cert.lock().unwrap(), &stats, &info)?;
+        draw(&mut terminal, &logs, &cert.lock().unwrap(), &stats, &info, has_clipboard, &mut last_copy)?;
 
-        // Handle input with a short poll so the timer keeps updating.
         if event::poll(Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
-            && (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
-                || key.code == KeyCode::Char('q'))
         {
-            // Signal the server to shut down gracefully and exit the TUI.
-            shutdown.notify_one();
-            break;
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.code == KeyCode::Char('q')
+            {
+                shutdown.notify_one();
+                break;
+            }
+            if has_clipboard
+                && key.code == KeyCode::Char('C')
+                && key.modifiers.contains(KeyModifiers::SHIFT)
+            {
+                copy_logs_to_clipboard(&logs, &mut clipboard);
+                last_copy = Some(SystemTime::now());
+            }
         }
         if last_tick.elapsed() >= Duration::from_millis(250) {
             last_tick = std::time::Instant::now();
@@ -216,12 +221,12 @@ fn draw(
     cert: &CertView,
     stats: &(usize, usize),
     info: &ServerInfo,
+    has_clipboard: bool,
+    last_copy: &mut Option<SystemTime>,
 ) -> anyhow::Result<()> {
     terminal.draw(|f| {
         let area = f.area();
 
-        // Vertical split for the left side: a compact technical-info header
-        // above the scrolling logs. The TOFU panel stays on the right when wide.
         let left = |f: &mut ratatui::Frame, area: Rect| {
             let info_h = 7u16.min(area.height);
             let chunks = Layout::default()
@@ -231,13 +236,10 @@ fn draw(
                     Constraint::Min(3),         // logs
                 ])
                 .split(area);
-            draw_info(f, chunks[0], info, cert, stats);
+            draw_info(f, chunks[0], info, cert, stats, has_clipboard, last_copy);
             draw_logs(f, chunks[1], logs);
         };
 
-        // Adaptive layout: show the TOFU panel only when the terminal is wide
-        // enough to render a readable QR code. Otherwise logs take the full
-        // width. This removes the previous minimum-size requirement.
         if area.width >= MIN_SPLIT_WIDTH + TOFU_PANEL_WIDTH {
             let tofu_w = TOFU_PANEL_WIDTH.min(area.width.saturating_sub(MIN_SPLIT_WIDTH));
             let chunks = Layout::default()
@@ -264,6 +266,8 @@ fn draw_info(
     info: &ServerInfo,
     cert: &CertView,
     stats: &(usize, usize),
+    has_clipboard: bool,
+    last_copy: &Option<SystemTime>,
 ) {
     let fp = if cert.fingerprint_raw.len() >= 16 {
         &cert.fingerprint_raw[..16]
@@ -277,7 +281,7 @@ fn draw_info(
         (expires % 3600) / 60,
         expires % 60,
     );
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled("Listen: ", Style::default().fg(Color::Gray)),
             Span::styled(
@@ -326,7 +330,29 @@ fn draw_info(
                 Span::raw("")
             },
         ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Press 'q' / Ctrl+C to stop", Style::default().fg(Color::DarkGray)),
+            if has_clipboard {
+                Span::raw("   ")
+            } else {
+                Span::raw("")
+            },
+            if has_clipboard {
+                Span::styled("Shift+C to copy logs", Style::default().fg(Color::DarkGray))
+            } else {
+                Span::raw("")
+            },
+        ]),
     ];
+    if let Some(t) = last_copy {
+        if t.elapsed().unwrap_or_default() < Duration::from_secs(2) {
+            lines.push(Line::from(Span::styled(
+                "✓ Logs copied to clipboard",
+                Style::default().fg(Color::Green),
+            )));
+        }
+    }
 
     let block = Paragraph::new(lines)
         .block(
@@ -409,13 +435,52 @@ fn scroll_for_logs(area: Rect, total: usize) -> u16 {
     }
 }
 
+fn copy_logs_to_clipboard(logs: &[LogRecord], clipboard: &mut Option<ClipboardContext>) {
+    if let Some(ctx) = clipboard {
+        let text: String = logs
+            .iter()
+            .map(|rec| {
+                let ts = rec.timestamp.duration_since(UNIX_EPOCH).unwrap_or_default();
+                let secs = ts.as_secs();
+                let millis = ts.subsec_millis();
+                let ts_str = format!(
+                    "[{:02}:{:02}:{:02}.{:03}]",
+                    (secs / 3600) % 24,
+                    (secs / 60) % 60,
+                    secs % 60,
+                    millis
+                );
+                let lvl = match rec.level {
+                    Level::ERROR => "ERR",
+                    Level::WARN => "WRN",
+                    Level::INFO => "INF",
+                    Level::DEBUG => "DBG",
+                    Level::TRACE => "TRC",
+                };
+                format!("{} [{}] {}: {}", ts_str, lvl, rec.target, rec.message)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = ctx.set_contents(text);
+    }
+}
+
 fn draw_tofu(f: &mut ratatui::Frame, area: Rect, cert: &CertView) {
     // The right panel is split vertically: QR on top (centered), info below.
-    // QR code (version 1) = 21x21 modules * 2 cols/module = 42 cols + quiet zone.
-    // With borders and padding, allocate up to 28 rows for the QR area, but
-    // never more than the available height so a short terminal cannot panic
-    // the layout split.
-    let qr_rows = 28.min(area.height);
+    // The payload `impulse-cert:<64-hex>` (77 bytes) encodes as a v4 QR code
+    // with error-correction level L: 33x33 modules → 66 cols x 33 rows.
+    // When the terminal is too small for that, the QR block collapses to a
+    // hint and the fingerprint below remains the manual fallback.
+    const QR_WIDGET_COLS: u16 = 66;
+    const QR_WIDGET_ROWS: u16 = 33;
+
+    let qr_fits = area.width >= QR_WIDGET_COLS + 2 && area.height >= QR_WIDGET_ROWS + 12;
+    let qr_rows = if qr_fits {
+        QR_WIDGET_ROWS + 2
+    } else {
+        5 // collapsed hint block
+    }
+    .min(area.height);
     let info_rows = area.height.saturating_sub(qr_rows);
     let inner = Layout::default()
         .direction(Direction::Vertical)
@@ -433,22 +498,34 @@ fn draw_tofu(f: &mut ratatui::Frame, area: Rect, cert: &CertView) {
     let qr_inner = qr_outer_block.inner(inner[0]);
     f.render_widget(qr_outer_block, inner[0]);
 
-    // Center the QR widget within qr_inner (clamped to the available area).
-    // QR version 1 renders ~42 cols x 21 rows. Center it.
-    let qr_widget_area = centered_rect(44.min(qr_inner.width), 23.min(qr_inner.height), qr_inner);
-
-    let qr_string = cert.tofu_qr_string();
-    match qrcode::QrCode::new(&qr_string) {
-        Ok(qr) => {
-            let widget = tui_qrcode::QrCodeWidget::new(qr);
-            f.render_widget(widget, qr_widget_area);
+    if qr_fits {
+        let qr_widget_area = centered_rect(
+            QR_WIDGET_COLS.min(qr_inner.width),
+            QR_WIDGET_ROWS.min(qr_inner.height),
+            qr_inner,
+        );
+        let qr_string = cert.tofu_qr_string();
+        // ECL::L keeps the code at v4 (77 bytes fit); the default ECL::M would
+        // bump it to v5, which no longer fits the panel. Quiet zone is skipped —
+        // the dark block border already separates the code from the frame.
+        match qrcode::QrCode::with_error_correction_level(&qr_string, qrcode::EcLevel::L) {
+            Ok(qr) => {
+                let widget = tui_qrcode::QrCodeWidget::new(qr)
+                    .quiet_zone(tui_qrcode::QuietZone::Disabled);
+                f.render_widget(widget, qr_widget_area);
+            }
+            Err(_) => {
+                let p = Paragraph::new("QR encode error")
+                    .style(Style::default().fg(Color::Red))
+                    .alignment(Alignment::Center);
+                f.render_widget(p, qr_widget_area);
+            }
         }
-        Err(_) => {
-            let p = Paragraph::new("QR encode error")
-                .style(Style::default().fg(Color::Red))
-                .alignment(Alignment::Center);
-            f.render_widget(p, qr_widget_area);
-        }
+    } else {
+        let p = Paragraph::new("Terminal too small for QR —\nenter the fingerprint below\nmanually in the client.")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(p, qr_inner);
     }
 
     // Right side: full grouped fingerprint + issue time + rotation status.
@@ -486,10 +563,6 @@ fn draw_tofu(f: &mut ratatui::Frame, area: Rect, cert: &CertView) {
         )));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Press 'q' or Ctrl+C to stop",
-        Style::default().fg(Color::DarkGray),
-    )));
 
     let info = Paragraph::new(lines)
         .block(

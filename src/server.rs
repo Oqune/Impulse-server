@@ -2,26 +2,52 @@
 //!
 //! Responsibilities:
 //!   * Accept WebTransport sessions using the managed self-signed certificate.
-//!   * For each session, open a bidirectional stream of length-prefixed binary
+//!   * For each session, run a bidirectional loop of length-prefixed binary
 //!     [`Opcode`] packets.
 //!   * The server never decrypts payloads; it only forwards opaque bytes.
 //!   * Periodically sweep expired messages and rotate the certificate.
 
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Semaphore, broadcast, mpsc};
 use tracing::{debug, info, warn};
 use wtransport::endpoint::endpoint_side;
-use wtransport::{Endpoint, ServerConfig, SessionId};
+use wtransport::{Endpoint, ServerConfig};
 
 use crate::cert::CertManager;
 use crate::cert::DynamicCertResolver;
 use crate::protocol::{Opcode, PacketReader, RelayedMessage, ServerPacketEncoder};
 use crate::storage::MessageStore;
 use crate::tui::TuiHandle;
+
+fn opcode_name(b: u8) -> &'static str {
+    match b {
+        0x01 => "Auth",
+        0x02 => "AuthResult",
+        0x03 => "Sync",
+        0x04 => "SyncResponse",
+        0x05 => "Data",
+        0x06 => "Heartbeat",
+        0x07 => "NewCertHash",
+        0x08 => "KeyExchange",
+        _ => "UNKNOWN",
+    }
+}
+
+fn hex_dump(bytes: &[u8], max: usize) -> String {
+    let show = bytes.len().min(max);
+    let hex: String = bytes[..show].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+    if bytes.len() > max {
+        format!("{}... ({} bytes total)", hex, bytes.len())
+    } else {
+        format!("{} ({} bytes)", hex, bytes.len())
+    }
+}
 
 /// Max incoming message payload size (bytes) to bound memory.
 const MAX_PAYLOAD_BYTES: usize = 1_000_000;
@@ -45,6 +71,15 @@ const MAX_CONCURRENT_SESSIONS: usize = 1024;
 /// most this many; they should issue further `Sync` calls to catch up.
 const MAX_SYNC_MESSAGES: usize = 500;
 
+/// Max connections per IP within the rate-limit window.
+const MAX_CONNECTIONS_PER_IP: usize = 10;
+
+/// Rate-limit window duration.
+const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(10);
+
+/// WebTransport handshake timeout.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Shared server state.
 pub struct RelayServer {
     config: crate::config::ServerSettings,
@@ -55,12 +90,12 @@ pub struct RelayServer {
     /// Broadcast hub for control packets (NewCertHash).
     control_tx: broadcast::Sender<Vec<u8>>,
     /// KeyExchange packets with sender session id for exclusion.
-    keyexchange_tx: broadcast::Sender<(SessionId, Vec<u8>)>,
-    /// Active sessions registry for direct sends.
-    sessions: Arc<DashMap<SessionId, mpsc::Sender<Vec<u8>>>>,
+    keyexchange_tx: broadcast::Sender<(u64, Vec<u8>)>,
+    /// Active sessions registry for direct sends (keyed by session id).
+    sessions: Arc<DashMap<u64, mpsc::Sender<Vec<u8>>>>,
     /// Dynamic TLS certificate resolver. Swapping its inner certificate set on
-    /// rotation makes freshly-connecting clients immediately see the new
-    /// certificate without recreating the `Endpoint` (see E1).
+    /// rotation makes freshly-connecting WebTransport clients immediately see the
+    /// new certificate without recreating the `Endpoint` (see E1).
     cert_resolver: Arc<DynamicCertResolver>,
     /// Pre-built WebTransport `Endpoint` (binds the `cert_resolver`). Built once
     /// in `new()`; the certificate resolver is swapped on rotation without
@@ -68,6 +103,8 @@ pub struct RelayServer {
     endpoint: Arc<tokio::sync::Mutex<Option<wtransport::Endpoint<endpoint_side::Server>>>>,
     /// Bounds the number of concurrent sessions to protect against DoS (see E4).
     session_semaphore: Arc<Semaphore>,
+    /// Per-IP rate limiter (connection attempts within sliding window).
+    ip_connections: Arc<std::sync::Mutex<HashMap<IpAddr, Vec<Instant>>>>,
     tui: TuiHandle,
     /// Password hash for authentication (SHA-256 hex).
     password_hash: String,
@@ -111,6 +148,7 @@ impl RelayServer {
             cert_resolver,
             endpoint: Arc::new(tokio::sync::Mutex::new(Some(endpoint))),
             session_semaphore,
+            ip_connections: Arc::new(std::sync::Mutex::new(HashMap::new())),
             tui: tui.clone(),
             password_hash: config.password_hash.clone(),
         };
@@ -167,7 +205,18 @@ impl RelayServer {
                     break;
                 }
                 Next::Session(incoming_session) => {
-                    let incoming_request = incoming_session.await;
+                    let incoming_request = match tokio::time::timeout(
+                        HANDSHAKE_TIMEOUT,
+                        incoming_session,
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(_) => {
+                            warn!("Session handshake timed out");
+                            continue;
+                        }
+                    };
                     let connection = match incoming_request {
                         Ok(r) => match r.accept().await {
                             Ok(c) => c,
@@ -181,17 +230,26 @@ impl RelayServer {
                             continue;
                         }
                     };
-                    info!("New WebTransport session: {}", connection.session_id());
+                    info!("[CONNECT] New WebTransport session: {} from {} (cert SANs: {:?})",
+                        connection.session_id().into_u64(), connection.remote_address(), self.config.san);
+
+                    // Per-IP rate limiting: reject if too many recent connections
+                    // from the same address (within RATE_LIMIT_WINDOW).
+                    let remote_ip = connection.remote_address().ip();
+                    if !self.check_rate_limit(remote_ip) {
+                        connection.close(wtransport::VarInt::from(0u32), b"rate_limit");
+                        continue;
+                    }
 
                     // Bound concurrent sessions (E4): reject when at capacity to avoid
                     // unbounded memory growth / DoS. Acquire a permit for the session's
-                    // lifetime; it is released when `handle_session` returns.
+                    // lifetime; it is released when `handle_wt_session` returns.
                     let permit = match self.session_semaphore.clone().try_acquire_owned() {
                         Ok(permit) => permit,
                         Err(_) => {
                             warn!(
                                 "Session {} rejected: too many concurrent sessions ({})",
-                                connection.session_id(),
+                                connection.session_id().into_u64(),
                                 MAX_CONCURRENT_SESSIONS
                             );
                             connection.close(wtransport::VarInt::from(0u32), b"capacity");
@@ -199,10 +257,8 @@ impl RelayServer {
                         }
                     };
                     // Spawn each session as its own task so the accept loop is never
-                    // blocked by a single slow/abandoned client (K1/K2). `SessionId` is
-                    // `Send + Sync` (it is a `u64` wrapper shared via broadcast channels),
-                    // and the `OwnedSemaphorePermit` is `Send`, so this is sound.
-                    tokio::spawn(self.clone().handle_session(connection, permit));
+                    // blocked by a single slow/abandoned client (K1/K2).
+                    tokio::spawn(self.clone().handle_wt_session(connection, permit));
                 }
             }
         }
@@ -215,13 +271,75 @@ impl RelayServer {
         Ok(())
     }
 
-    async fn handle_session(
+    /// Per-IP rate limiting shared by both transports. Returns `true` if the
+    /// connection is allowed, `false` if it should be rejected.
+    fn check_rate_limit(&self, remote_ip: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut ip_map = self.ip_connections.lock().unwrap();
+        let times = ip_map.entry(remote_ip).or_default();
+        times.retain(|t| now.duration_since(*t) < RATE_LIMIT_WINDOW);
+        if times.len() >= MAX_CONNECTIONS_PER_IP {
+            warn!(
+                "Rate limit hit for {} ({} connections in {:?})",
+                remote_ip, times.len(), RATE_LIMIT_WINDOW
+            );
+            return false;
+        }
+        times.push(now);
+        true
+    }
+
+    // ------------------------------------------------------------------
+    // WebTransport session entry point
+    // ------------------------------------------------------------------
+
+    async fn handle_wt_session(
         self: Arc<Self>,
         connection: wtransport::Connection,
         _permit: tokio::sync::OwnedSemaphorePermit,
     ) {
-        let session_id: SessionId = connection.session_id();
+        let session_key: u64 = connection.session_id().into_u64();
+        let remote_ip = connection.remote_address().ip();
 
+        // Accept the bidirectional stream opened by the client. WebTransport uses
+        // a client-initiated stream: the Android client calls
+        // `createBidirectionalStream`, and the server must `accept_bi` the SAME
+        // stream. Using `open_bi` here created a separate server-initiated stream,
+        // so the two endpoints ended up on different streams and no data flowed
+        // in either direction (session handshake succeeded, but auth/relay never
+        // worked).
+        info!("[STREAM] Session {} waiting to accept bidirectional stream...", session_key);
+        let (send_stream, recv_stream) = match connection.accept_bi().await {
+            Ok(pair) => {
+                info!("[STREAM] Session {} stream accepted OK", session_key);
+                pair
+            }
+            Err(e) => {
+                info!("[STREAM] Session {} accept_bi FAILED: {}", session_key, e);
+                connection.close(wtransport::VarInt::from(0u32), b"stream");
+                return;
+            }
+        };
+
+        self.run_session(session_key, remote_ip, recv_stream, send_stream, _permit)
+            .await;
+    }
+
+    // ------------------------------------------------------------------
+    // Session loop
+    // ------------------------------------------------------------------
+
+    async fn run_session<R, W>(
+        self: Arc<Self>,
+        session_key: u64,
+        _remote_ip: IpAddr,
+        mut reader: R,
+        mut writer: W,
+        _permit: tokio::sync::OwnedSemaphorePermit,
+    ) where
+        R: AsyncReadExt + Unpin + Send + 'static,
+        W: AsyncWriteExt + Unpin + Send + 'static,
+    {
         // Each session gets its own broadcast subscriptions.
         let mut data_sub = self.data_tx.subscribe();
         let mut control_sub = self.control_tx.subscribe();
@@ -231,85 +349,80 @@ impl RelayServer {
         let (direct_tx, mut direct_rx) = mpsc::channel::<Vec<u8>>(32);
 
         // Register this session's direct sender.
-        self.sessions.insert(session_id, direct_tx.clone());
+        self.sessions.insert(session_key, direct_tx.clone());
         self.tui.set_stats(self.sessions.len(), self.store.len());
-
-        // Open a bidirectional stream for the control/data channel.
-        let (send_stream, recv_stream) = match connection.clone().open_bi().await {
-            Ok(opening) => match opening.await {
-                Ok(pair) => pair,
-                Err(e) => {
-                    warn!("Failed to open stream for session {}: {}", session_id, e);
-                    connection.close(wtransport::VarInt::from(0u32), b"stream");
-                    self.sessions.remove(&session_id);
-                    self.tui.set_stats(self.sessions.len(), self.store.len());
-                    return;
-                }
-            },
-            Err(e) => {
-                warn!("Failed to open stream for session {}: {}", session_id, e);
-                connection.close(wtransport::VarInt::from(0u32), b"stream");
-                self.sessions.remove(&session_id);
-                self.tui.set_stats(self.sessions.len(), self.store.len());
-                return;
-            }
-        };
-
-        let (mut send_stream, mut recv_stream) = (send_stream, recv_stream);
 
         // Task: forward broadcast messages AND direct responses to this session's send stream.
         let writer_task = {
             tokio::spawn(async move {
+                info!("[WRITER] Session {} writer task started", session_key);
                 loop {
                     tokio::select! {
                         Ok(msg) = data_sub.recv() => {
                             let packet = msg.to_packet();
-                            if let Err(e) = send_stream.write_all(&packet).await {
-                                debug!("Send error to session {}: {}", session_id, e);
+                            let op = if packet.is_empty() { 0 } else { packet[0] };
+                            info!("[WRITER] Session {} <- DATA relay opcode=0x{:02x} ({}) len={}",
+                                session_key, op, opcode_name(op), packet.len());
+                            if let Err(e) = writer.write_all(&packet).await {
+                                info!("[WRITER] Session {} write error: {}", session_key, e);
                                 break;
                             }
-                            if let Err(e) = send_stream.flush().await {
-                                debug!("Flush error to session {}: {}", session_id, e);
+                            if let Err(e) = writer.flush().await {
+                                info!("[WRITER] Session {} flush error: {}", session_key, e);
                                 break;
                             }
                         }
                         Ok(packet) = control_sub.recv() => {
-                            if let Err(e) = send_stream.write_all(&packet).await {
-                                debug!("Control send error to session {}: {}", session_id, e);
+                            let op = if packet.is_empty() { 0 } else { packet[0] };
+                            info!("[WRITER] Session {} <- CONTROL opcode=0x{:02x} ({}) len={}",
+                                session_key, op, opcode_name(op), packet.len());
+                            if let Err(e) = writer.write_all(&packet).await {
+                                info!("[WRITER] Session {} control write error: {}", session_key, e);
                                 break;
                             }
-                            if let Err(e) = send_stream.flush().await {
-                                debug!("Control flush error to session {}: {}", session_id, e);
+                            if let Err(e) = writer.flush().await {
+                                info!("[WRITER] Session {} control flush error: {}", session_key, e);
                                 break;
                             }
                         }
                         Ok((src_session, packet)) = keyexchange_sub.recv() => {
-                            if src_session == session_id {
-                                continue; // skip own key exchange
+                            if src_session == session_key {
+                                continue;
                             }
-                            if let Err(e) = send_stream.write_all(&packet).await {
-                                debug!("KeyExchange send error to session {}: {}", session_id, e);
+                            let op = if packet.is_empty() { 0 } else { packet[0] };
+                            info!("[WRITER] Session {} <- KEYEXCHANGE (from session {}) opcode=0x{:02x} ({}) len={}",
+                                session_key, src_session, op, opcode_name(op), packet.len());
+                            if let Err(e) = writer.write_all(&packet).await {
+                                info!("[WRITER] Session {} keyexchange write error: {}", session_key, e);
                                 break;
                             }
-                            if let Err(e) = send_stream.flush().await {
-                                debug!("KeyExchange flush error to session {}: {}", session_id, e);
+                            if let Err(e) = writer.flush().await {
+                                info!("[WRITER] Session {} keyexchange flush error: {}", session_key, e);
                                 break;
                             }
                         }
                         Some(packet) = direct_rx.recv() => {
-                            if let Err(e) = send_stream.write_all(&packet).await {
-                                debug!("Direct send error to session {}: {}", session_id, e);
+                            let op = if packet.is_empty() { 0 } else { packet[0] };
+                            info!("[WRITER] Session {} <- DIRECT opcode=0x{:02x} ({}) len={}",
+                                session_key, op, opcode_name(op), packet.len());
+                            if let Err(e) = writer.write_all(&packet).await {
+                                info!("[WRITER] Session {} direct write error: {}", session_key, e);
                                 break;
                             }
-                            if let Err(e) = send_stream.flush().await {
-                                debug!("Direct flush error to session {}: {}", session_id, e);
+                            if let Err(e) = writer.flush().await {
+                                info!("[WRITER] Session {} direct flush error: {}", session_key, e);
                                 break;
                             }
                         }
-                        else => break,
+                        else => {
+                            info!("[WRITER] Session {} all channels closed, stopping", session_key);
+                            break;
+                        }
                     }
                 }
-                let _ = send_stream.finish().await;
+                let _ = writer.flush().await;
+                let _ = writer.shutdown().await;
+                info!("[WRITER] Session {} writer task ended", session_key);
             })
         };
 
@@ -318,19 +431,27 @@ impl RelayServer {
             let this = self.clone();
             let direct_tx = direct_tx.clone();
             tokio::spawn(async move {
+                info!("[READER] Session {} reader task started", session_key);
                 let mut buf: Vec<u8> = Vec::with_capacity(4096);
                 let mut chunk = [0u8; 8192];
                 let mut authenticated = false;
 
                 loop {
                     let read =
-                        tokio::time::timeout(SESSION_IDLE_TIMEOUT, recv_stream.read(&mut chunk))
-                            .await;
+                        tokio::time::timeout(SESSION_IDLE_TIMEOUT, reader.read(&mut chunk)).await;
                     match read {
-                        Ok(Ok(Some(n))) => {
+                        Ok(Ok(0)) => {
+                            info!("[READER] Session {} EOF (client disconnected)", session_key);
+                            break; // EOF
+                        }
+                        Ok(Ok(n)) => {
+                            info!("[READER] Session {} raw chunk: {} bytes", session_key, n);
+                            info!("[READER] Session {} hex: {}", session_key, hex_dump(&chunk[..n], 128));
                             buf.extend_from_slice(&chunk[..n]);
+                            info!("[READER] Session {} buffer now {} bytes", session_key, buf.len());
                             if buf.len() > MAX_STREAM_BUFFER {
-                                warn!("Session {} stream buffer overflow", session_id);
+                                info!("[READER] Session {} BUFFER OVERFLOW ({} > {}), closing",
+                                    session_key, buf.len(), MAX_STREAM_BUFFER);
                                 break;
                             }
                             // Process all complete packets.
@@ -338,67 +459,78 @@ impl RelayServer {
                                 match try_read_packet(&buf) {
                                     Ok(Some(packet_len)) => {
                                         if packet_len > buf.len() {
-                                            break; // incomplete packet, need more data
+                                            info!("[READER] Session {} partial packet: declared {} but buffer has {}, waiting",
+                                                session_key, packet_len, buf.len());
+                                            break;
                                         }
                                         let packet_data: Vec<u8> =
                                             buf.drain(..packet_len).collect();
+                                        let op = if packet_data.is_empty() { 0 } else { packet_data[0] };
+                                        info!("[READER] Session {} -> opcode=0x{:02x} ({}) total_packet={} bytes",
+                                            session_key, op, opcode_name(op), packet_len);
                                         if let Err(e) = this
                                             .process_packet(
-                                                session_id,
+                                                session_key,
                                                 &packet_data,
                                                 &mut authenticated,
                                                 &direct_tx,
                                             )
                                             .await
                                         {
-                                            warn!("Session {} packet error: {}", session_id, e);
+                                            info!("[READER] Session {} packet error: {} (authenticated={})",
+                                                session_key, e, authenticated);
                                             break;
                                         }
                                     }
-                                    Ok(None) => break, // incomplete, wait for more data
+                                    Ok(None) => {
+                                        info!("[READER] Session {} incomplete packet, waiting for more data (buf={} bytes)",
+                                            session_key, buf.len());
+                                        break; // incomplete, wait for more data
+                                    }
                                     Err(()) => {
-                                        // Unknown opcode: treat as a fatal protocol
-                                        // violation (not "incomplete"), close the
-                                        // connection to prevent buffer-exhaustion DoS
-                                        // (E3).
-                                        warn!("Session {} unknown opcode, closing", session_id);
+                                        info!("[READER] Session {} UNKNOWN OPCODE in buffer (first byte=0x{:02x}), closing",
+                                            session_key, if buf.is_empty() { 0 } else { buf[0] });
                                         break;
                                     }
                                 }
                             }
                         }
-                        Ok(Ok(None)) => break, // EOF
                         Ok(Err(e)) => {
-                            debug!("Receive error from session {}: {}", session_id, e);
+                            info!("[READER] Session {} stream read error: {}", session_key, e);
                             break;
                         }
                         Err(_) => {
-                            warn!(
-                                "Session {} idle timeout ({}s)",
-                                session_id,
-                                SESSION_IDLE_TIMEOUT.as_secs()
-                            );
+                            info!("[READER] Session {} IDLE TIMEOUT ({}s, no data from client)",
+                                session_key, SESSION_IDLE_TIMEOUT.as_secs());
                             break;
                         }
                     }
                 }
+                info!("[READER] Session {} reader task ended (authenticated={})", session_key, authenticated);
             })
         };
 
         // Wait for either task to finish, then clean up.
+        info!("[SESSION] Session {} waiting for writer/reader tasks to finish...", session_key);
         tokio::select! {
-            _ = writer_task => {},
-            _ = reader_task => {},
+            _ = writer_task => {
+                info!("[SESSION] Session {} writer task finished first", session_key);
+            },
+            _ = reader_task => {
+                info!("[SESSION] Session {} reader task finished first", session_key);
+            },
         }
-        info!("WebTransport session {} closed", session_id);
-        self.sessions.remove(&session_id);
+        info!("[SESSION] Session {} CLOSED (sessions_left={})",
+            session_key, self.sessions.len().saturating_sub(1));
+        self.sessions.remove(&session_key);
         self.tui.set_stats(self.sessions.len(), self.store.len());
-        connection.close(wtransport::VarInt::from(0u32), b"bye");
+        info!("[SESSION] Session {} cleanup complete, remaining sessions={}",
+            session_key, self.sessions.len());
     }
 
     async fn process_packet(
         self: &Arc<Self>,
-        session_id: SessionId,
+        session_key: u64,
         packet_data: &[u8],
         authenticated: &mut bool,
         direct_tx: &mpsc::Sender<Vec<u8>>,
@@ -408,26 +540,31 @@ impl RelayServer {
 
         match opcode {
             Opcode::Auth => {
-                // Auth: [0x01] [password UTF-8]
-                let password_bytes = reader
+                // Auth: [0x01] [SHA-256(password) as lowercase hex UTF-8]
+                let password_hash = reader
                     .read_len_prefixed()
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
-                let password = String::from_utf8(password_bytes)
+                let password_hash_str = String::from_utf8(password_hash)
                     .map_err(|_| anyhow::anyhow!("invalid UTF-8 in password"))?;
 
-                // Verify password hash (SHA-256), compared in constant time to
-                // avoid timing side-channels (C2).
-                use sha2::{Digest, Sha256};
-                use subtle::ConstantTimeEq;
-                let mut hasher = Sha256::new();
-                hasher.update(password.as_bytes());
-                let hash = hex::encode(hasher.finalize());
+                info!("[AUTH] Session {} got password_hash='{}' ({} hex chars)",
+                    session_key, &password_hash_str[..8], password_hash_str.len());
+                info!("[AUTH] Session {} stored hash='{}' ({} hex chars)",
+                    session_key, &self.password_hash[..8], self.password_hash.len());
 
-                let ok = hash.as_bytes().ct_eq(self.password_hash.as_bytes()).into();
+                use subtle::ConstantTimeEq;
+                let ok = password_hash_str
+                    .as_bytes()
+                    .ct_eq(self.password_hash.as_bytes())
+                    .into();
+                info!("[AUTH] Session {} passwords MATCH={}", session_key, ok);
+
                 let response = ServerPacketEncoder::auth_result(
                     ok,
                     if ok { None } else { Some("Invalid password") },
                 );
+                info!("[AUTH] Session {} sending AuthResult: success={} packet_len={}",
+                    session_key, ok, response.len());
 
                 direct_tx
                     .send(response)
@@ -436,26 +573,26 @@ impl RelayServer {
 
                 *authenticated = ok;
                 if !ok {
+                    info!("[AUTH] Session {} auth FAILED -> closing", session_key);
                     return Err(anyhow::anyhow!("authentication failed"));
                 }
+                info!("[AUTH] Session {} auth SUCCESS -> authenticated=true", session_key);
                 Ok(())
             }
             Opcode::Sync => {
                 if !*authenticated {
+                    info!("[SYNC] Session {} REJECTED: not authenticated", session_key);
                     return Err(anyhow::anyhow!("not authenticated"));
                 }
-                // Sync: [0x03] [8 bytes last_seen_id]
                 let last_seen_id = reader.read_u64().map_err(|e| anyhow::anyhow!("{}", e))?;
+                info!("[SYNC] Session {} sync request last_seen_id={}", session_key, last_seen_id);
 
-                debug!(
-                    "Session {} sync request last_seen_id={}",
-                    session_id, last_seen_id
-                );
                 let replay = self.store.since(last_seen_id, MAX_SYNC_MESSAGES);
                 let messages: Vec<(u64, u64, Vec<u8>)> = replay
                     .into_iter()
                     .map(|m| (m.id, m.timestamp, m.payload))
                     .collect();
+                info!("[SYNC] Session {} returning {} messages", session_key, messages.len());
 
                 let response = ServerPacketEncoder::sync_response(&messages);
                 direct_tx
@@ -466,34 +603,38 @@ impl RelayServer {
             }
             Opcode::Data => {
                 if !*authenticated {
+                    info!("[DATA] Session {} REJECTED: not authenticated", session_key);
                     return Err(anyhow::anyhow!("not authenticated"));
                 }
-                // Data (client→server): [0x05] [4 bytes len] [len bytes payload]
                 let payload = reader
                     .read_len_prefixed()
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
+                info!("[DATA] Session {} data payload={} bytes",
+                    session_key, payload.len());
 
                 if payload.len() > MAX_PAYLOAD_BYTES {
-                    warn!(
-                        "Session {} sent oversized payload ({} bytes), dropping",
-                        session_id,
-                        payload.len()
-                    );
+                    info!("[DATA] Session {} OVERSIZED payload {} > {}, dropping",
+                        session_key, payload.len(), MAX_PAYLOAD_BYTES);
                     return Ok(());
                 }
 
                 let stored = self.store.push(payload.clone());
+                info!("[DATA] Session {} stored id={}, broadcasting", session_key, stored.id);
                 let relayed = RelayedMessage {
                     id: stored.id,
                     timestamp: stored.timestamp,
                     payload: stored.payload,
                 };
-                let _ = self.data_tx.send(relayed);
+                let subs = self.data_tx.send(relayed);
+                match subs {
+                    Ok(n) => info!("[DATA] Session {} broadcast OK to {} receivers", session_key, n),
+                    Err(_) => info!("[DATA] Session {} broadcast: no receivers", session_key),
+                }
                 Ok(())
             }
             Opcode::Heartbeat => {
-                // Heartbeat: [0x06] [8 bytes client_timestamp]
                 let client_ts = reader.read_u64().map_err(|e| anyhow::anyhow!("{}", e))?;
+                info!("[HEARTBEAT] Session {} client_ts={}", session_key, client_ts);
                 let response = ServerPacketEncoder::heartbeat(client_ts);
                 direct_tx
                     .send(response)
@@ -503,23 +644,21 @@ impl RelayServer {
             }
             Opcode::KeyExchange => {
                 if !*authenticated {
+                    info!("[KEYEX] Session {} REJECTED: not authenticated", session_key);
                     return Err(anyhow::anyhow!("not authenticated"));
                 }
-                // KeyExchange: [0x08] [4 bytes len] [len bytes public_key]
                 let public_key = reader
                     .read_len_prefixed()
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
+                info!("[KEYEX] Session {} public_key={} bytes", session_key, public_key.len());
 
-                // Relay to all OTHER clients via keyexchange channel
-                let _ = self.keyexchange_tx.send((session_id, public_key));
+                let _ = self.keyexchange_tx.send((session_key, public_key));
+                info!("[KEYEX] Session {} relayed to all peers", session_key);
                 Ok(())
             }
             Opcode::AuthResult | Opcode::SyncResponse | Opcode::NewCertHash => {
-                // Server→client only, ignore if received from client
-                debug!(
-                    "Received server→client opcode {:?} from client, ignoring",
-                    opcode
-                );
+                info!("[IGNORE] Session {} received server->client opcode {:?}, ignoring",
+                    session_key, opcode);
                 Ok(())
             }
         }
@@ -540,10 +679,10 @@ impl RelayServer {
                 };
                 if rotated {
                     // E1: apply the new certificate to the live TLS resolver so
-                    // that freshly-connecting clients immediately see it without
-                    // recreating the Endpoint. Trust continuity for clients still
-                    // pinned to the old fingerprint is handled at the application
-                    // layer via the `NewCertHash` (0x07) broadcast below.
+                    // that freshly-connecting WebTransport clients immediately see
+                    // it without recreating the Endpoint. Trust continuity for
+                    // clients still pinned to the old fingerprint is handled at
+                    // the application layer via the `NewCertHash` (0x07) broadcast.
                     {
                         let cm = self.cert_manager.lock().unwrap();
                         let provider = Arc::new(crate::cert::default_crypto_provider());
@@ -566,17 +705,18 @@ impl RelayServer {
                         cert.fingerprint_grouped()
                     );
 
-                    // E2: broadcast the 32-byte SHA-256 fingerprint (TOFU hash),
-                    // matching what a WebTransport client compares against
-                    // `serverCertificateHashes`, not the full DER cert.
+                    // E2: announce the new fingerprint to connected clients so
+                    // they can pin it before the old certificate expires (the
+                    // 2-day overlap window).
                     let hash_bytes = cert.fingerprint_bytes();
                     let expires_at = cert
                         .not_after
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    let packet = ServerPacketEncoder::new_cert_hash(&hash_bytes, expires_at);
-                    let _ = self.control_tx.send(packet);
+                    let _ = self.control_tx.send(
+                        ServerPacketEncoder::new_cert_hash(&hash_bytes, expires_at)
+                    );
                     info!("Applied rotated certificate to live TLS resolver");
                 }
 

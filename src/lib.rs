@@ -43,12 +43,17 @@ pub async fn run(app_config: AppConfig, shutdown: Arc<Notify>) -> Result<()> {
 
     let initial_cert = cert_manager.lock().unwrap().current().clone();
     let cert_view = CertView::from_cert(&initial_cert);
+    let tofu_payload = cert_view.tofu_qr_string();
 
     // Spawn the TUI thread; it returns a handle to push logs and cert views.
     let tui = tui::spawn_tui(cert_view, shutdown.clone())?;
 
     // Route tracing output into the TUI + rotating log file.
-    logging::init_tracing(tui.clone(), "info");
+    logging::init_tracing(tui.clone(), "debug");
+
+    // Log the TOFU payload — it can be copied into the client's manual entry
+    // when the QR code cannot be scanned.
+    tracing::info!("TOFU payload: {}", tofu_payload);
 
     let relay = Arc::new(server::RelayServer::new(
         app_config.server.clone(),

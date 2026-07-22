@@ -75,10 +75,10 @@ mod protocol_tests {
     fn auth_result_status_byte() {
         let ok = encode_auth_result(true, None);
         assert_eq!(ok[0], 0x02);
-        assert_eq!(ok[1], 0x00);
+        assert_eq!(ok[1], 0x01);
         let fail = encode_auth_result(false, Some("bad"));
         assert_eq!(fail[0], 0x02);
-        assert_eq!(fail[1], 0x01);
+        assert_eq!(fail[1], 0x00);
         // payload is length-prefixed: u32 len (3) then "bad".
         assert_eq!(&fail[2..6], &3u32.to_le_bytes());
         assert_eq!(&fail[6..9], b"bad");

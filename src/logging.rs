@@ -1,12 +1,11 @@
 //! Bridge between `tracing` and the TUI.
 //!
 //! We implement a minimal `tracing::Subscriber` that forwards every log event
-//! to the TUI's log channel. A standard `fmt` layer is also added for
-//! debugging when running outside the TUI.
+//! to the TUI's log channel. A `fmt` layer is also added for a rotating log
+//! file under `logs/` for post-hoc debugging.
 
 use std::time::SystemTime;
 
-use tracing::level_filters::LevelFilter;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -78,8 +77,8 @@ impl<'a> tracing::field::Visit for MessageVisitor<'a> {
     }
 }
 
-/// Install the global tracing subscriber, sending events to the TUI, stderr, and
-/// a rolling daily log file under `logs/`. Must be called once before logging.
+/// Install the global tracing subscriber, sending events to the TUI and
+/// a log file under `logs/`. Must be called once before logging.
 pub fn init_tracing(tui: TuiHandle, env_filter: &str) {
     let tui_layer = TuiLogLayer { tui };
 
@@ -87,16 +86,6 @@ pub fn init_tracing(tui: TuiHandle, env_filter: &str) {
     let file_layer = rolling::never("logs", "impulse-server.log");
 
     let registry = tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr)
-                .with_timer(BracketTimer)
-                .with_filter(LevelFilter::from_level(tracing::Level::INFO))
-                .with_filter(
-                    tracing_subscriber::EnvFilter::try_new(env_filter)
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-                ),
-        )
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(file_layer)

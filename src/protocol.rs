@@ -214,7 +214,7 @@ impl PacketWriter {
 /// Build an `AuthResult` packet.
 pub fn encode_auth_result(ok: bool, message: Option<&str>) -> Vec<u8> {
     let mut w = PacketWriter::with_opcode(Opcode::AuthResult);
-    w.write_u8(if ok { 0x00 } else { 0x01 });
+    w.write_u8(if ok { 0x01 } else { 0x00 });
     if let Some(msg) = message {
         w.write_len_prefixed(msg.as_bytes());
     }

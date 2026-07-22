@@ -23,7 +23,9 @@ path = "src/main.rs"
 wtransport = { version = "0.7", features = ["quinn"] }
 
 # TLS / certificate generation
-rustls = "0.23"
+# aws-lc-rs enables hybrid PQ X25519Kyber768 key exchange for TLS 1.3.
+# The `pq` feature on aws-lc-rs must be explicit so cargo unifies it transitively.
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
 rustls-pki-types = "1.10"
 rcgen = "0.14"
 sha2 = "0.10"
@@ -43,6 +45,9 @@ qrcode = { version = "0.14", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
+
+# Clipboard support for log copy
+copypasta = "0.10"
 
 # Concurrency-friendly collections
 dashmap = "6"
