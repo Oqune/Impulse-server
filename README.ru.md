@@ -22,7 +22,7 @@ Impulse — это relay-сервер для end-to-end-encrypted мессенд
 - **Транспорт:** только WebTransport поверх QUIC (`wtransport` 0.7). TLS 1.3 обязателен; старый WSS-транспорт удалён.
 - **Бинарный протокол:** length-prefixed бинарные фреймы с опкодами `0x01`–`0x08` (little-endian), не JSON.
 - **Аутентификация:** клиенты обязаны отправить `Auth` с паролем; сервер проверяет SHA-256 хэш в constant time.
-- **TLS / Сертификаты:** самоподписанные **Ed25519** сертификаты, срок действия **14 дней**, автоматическая ротация с **2-дневным окном перекрытия**. PEM-материал сохраняется в `cert_dir` (путь относительно исполняемого файла, права `0600` на Unix).
+- **TLS / Сертификаты:** самоподписанные **ECDSA P-256** сертификаты, срок действия **14 дней**, автоматическая ротация с **2-дневным окном перекрытия**. PEM-материал сохраняется в `cert_dir` (путь относительно исполняемого файла, права `0600` на Unix, эксклюзивный DACL на Windows).
 - **TOFU:** сервер отображает QR-код (правая панель TUI), содержащий SHA-256 отпечаток DER-сертификата и время выпуска. Клиенты сканируют его, закрепляют `serverCertificateHashes` и доверяют серверу при первом использовании. При ротации новый отпечаток рассылается через `NewCertHash` (0x07).
 - **Хранилище:** in-RAM ring buffer, сообщения истекают через 72 ч (`TTL`), ограничено количеством (`10_000`) и размером полезной нагрузки (`1 MB`).
 - **Relay:** broadcast всем активным сессиям; поздние подключающиеся догоняют через `Sync { last_seen_id }`.
@@ -47,11 +47,106 @@ cargo build --release
 | `--host` | | Хост для привязки (переопределяет конфиг) | `0.0.0.0` |
 | `--port` | `-p` | Порт WebTransport (QUIC) | `4433` |
 | `--cert-dir` | | Каталог для генерируемых сертификата/ключа | `cert_data` |
-| `--san` | | Дополнительный SAN (DNS или IP) для самоподписанного сертификата (повторяем) | _нет_ |
+| `--san` | | Дополнительный SAN (DNS или IP) для самоподписанного сертификата (повторяемый) | _нет_ |
 | `--password-hash` | | SHA-256 hex пароля клиента (обязателен) | _нет_ |
 | `--config` | | Путь к TOML-конфигу | `./config.toml` |
 
-`password_hash` **обязателен** — небезопасного значения по умолчанию нет. Сгенерируйте: `printf 'pw' | sha256sum`.
+`password_hash` **обязателен** — небезопасного значения по умолчанию нет. Сгенерируйте:
+`printf 'pw' | sha256sum` или встроенным хелпером:
+
+```bash
+./target/release/Impulse-server --hash-password yourpassword
+```
+
+## Продакшен-развёртывание
+
+### Требования
+
+- **Rust 1.85+** (edition 2024) для сборки из исходников.
+- **Доступный по UDP** порт (QUIC работает поверх UDP). Откройте/пробросьте порт в фаерволе / security groups.
+- На **Unix** файл приватного ключа автоматически создаётся с правами `0600`; на Windows DACL ограничивается текущим пользователем через `icacls`.
+- **Root/administrator НЕ требуется** — используйте высокий порт (например, `4433`) вместо `443`. QR/TOFU-поток позволяет клиентам доверять самоподписанному сертификату, поэтому публичный CA не нужен.
+
+### Рекомендуемые флаги запуска
+
+В продакшене используйте `RUST_LOG=info` или `RUST_LOG=warn`, чтобы избежать лишнего I/O от hex-дампа в debug-режиме:
+
+```bash
+RUST_LOG=info ./target/release/Impulse-server --config config.toml
+```
+
+Сервер ведёт rolling-логи в `logs/` (суточная ротация, retention 7 дней).
+
+### Systemd-сервис (Linux)
+
+Создайте `/etc/systemd/system/impulse-server.service`:
+
+```ini
+[Unit]
+Description=Impulse Server
+After=network.target
+
+[Service]
+Type=simple
+User=impulse
+WorkingDirectory=/opt/impulse-server
+ExecStart=/opt/impulse-server/Impulse-server --config /opt/impulse-server/config.toml
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now impulse-server
+```
+
+### Docker
+
+```dockerfile
+FROM rust:1.85-slim AS builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/target/release/Impulse-server /usr/local/bin/impulse-server
+COPY config.toml /etc/impulse-server/config.toml
+VOLUME /var/lib/impulse-server/cert_data /var/log/impulse-server
+EXPOSE 4433/udp
+ENV RUST_LOG=info
+ENTRYPOINT ["impulse-server", "--config", "/etc/impulse-server/config.toml"]
+```
+
+```bash
+docker build -t impulse-server .
+docker run -d \
+  --name impulse \
+  --restart unless-stopped \
+  -v cert_data:/var/lib/impulse-server/cert_data \
+  -v impulse_logs:/var/log/impulse-server \
+  -p 4433:4433/udp \
+  impulse-server
+```
+
+### Фаервол
+
+QUIC использует UDP. Убедитесь, что выбранный порт открыт:
+
+```bash
+# ufw (Ubuntu/Debian)
+sudo ufw allow 4433/udp
+
+# firewalld (RHEL/CentOS/Fedora)
+sudo firewall-cmd --add-port=4433/udp --permanent && sudo firewall-cmd --reload
+
+# Windows PowerShell
+New-NetFirewallRule -DisplayName "Impulse QUIC" -Direction Inbound -Protocol UDP -LocalPort 4433 -Action Allow
+```
 
 ## Поддерживаемые платформы
 
@@ -73,7 +168,7 @@ Impulse-server написан на переносимом Rust (edition 2024) и
 
 - **Rust 1.85+** (edition 2024).
 - **Доступный по UDP** порт (QUIC работает поверх UDP). Откройте/пробросьте настроенный порт в файрволах.
-- На **Unix** файл приватного ключа автоматически создаётся с правами `0600`; на Windows ACL оставляется на усмотрение ОС.
+- На **Unix** файл приватного ключа автоматически создаётся с правами `0600`; на Windows DACL ограничивается текущим пользователем.
 - **Root/administrator НЕ требуется** — биндитесь на высокий порт (например, `4433`) вместо `443`. QR/TOFU-поток позволяет клиентам доверять самоподписанному сертификату, поэтому публичный CA не нужен.
 
 ## Протокол (бинарный, little-endian)
@@ -86,7 +181,7 @@ Impulse-server написан на переносимом Rust (edition 2024) и
 | `0x02` | S→C | AuthResult | `u8` статус (`0`=ok, `1`=fail) + опциональный `len`-prefixed текст |
 | `0x03` | C→S | Sync | `u64` last_seen_id |
 | `0x04` | S→C | SyncResponse | `u32` count, затем для каждого сообщения: `u64 id`, `u64 ts`, `len`-prefixed payload |
-| `x05` | C→S / S→C | Data | C→S: `len`-prefixed payload. S→C: `u64 id`, `u64 ts`, `len`-prefixed payload |
+| `0x05` | C→S / S→C | Data | C→S: `len`-prefixed payload. S→C: `u64 id`, `u64 ts`, `len`-prefixed payload |
 | `0x06` | обе | Heartbeat | `u64` client_timestamp (эхо-ответ) |
 | `0x07` | S→C | NewCertHash | ровно 32 сырых байта SHA-256 + `u64` unix expiry |
 | `0x08` | C→S / S→C | KeyExchange | `len`-prefixed публичный ключ (ретранслируется другим клиентам) |
@@ -96,27 +191,29 @@ Impulse-server написан на переносимом Rust (edition 2024) и
 ## Безопасность
 
 - Обязательный QUIC/TLS 1.3 транспорт (WebTransport).
-- Краткоживущие Ed25519 сертификаты (14 дн.) с автоматической ротацией (2 дн. перекрытие); новый сертификат применяется к **рабочему** TLS resolver'у (без рестарта) и анонсируется через `NewCertHash`.
+- Краткоживущие ECDSA P-256 сертификаты (14 дн.) с автоматической ротацией (2 дн. перекрытие); новый сертификат применяется к **рабочему** TLS resolver'у (без рестарта) и анонсируется через `NewCertHash`.
+- Гибридный постквантовый обмен ключами (X25519Kyber768) через `aws-lc-rs`.
 - TOFU pinning отпечатка через QR-код + контрольный пакет `NewCertHash`.
 - Эфемерное RAM-only хранилище, TTL 72 ч, ограниченный ring buffer и размер полезной нагрузки.
 - Constant-time сравнение хэша пароля.
-- Файл приватного ключа ограничен `0600` на Unix.
+- Файл приватного ключа ограничен `0600` на Unix; эксклюзивный DACL на Windows.
+- Per-IP rate limiting и лимит сессий для защиты от DoS.
 - Открытый текст, пароли или полезные нагрузки не логируются.
 
 ## Корректное завершение работы
 
-`Ctrl+C` / `SIGTERM` (или `q` в TUI) запускают graceful shutdown: эндпойнт перестаёт принимать новые сессии, активные writer'ы дрейнятся. Логи также пишутся в `logs/impulse-server.log`.
+`Ctrl+C` / `SIGTERM` (или `q` в TUI) запускают graceful shutdown: эндпойнт перестаёт принимать новые сессии, активные writer'ы дрейнятся. Логи пишутся в `logs/` с суточной ротацией и retention 7 дней.
 
 ## Структура проекта
 
 ```
 src/
-  cert.rs      — генерация Ed25519 сертификатов, ротация, SHA-256 TOFU отпечаток, FS персист
+  cert.rs      — генерация ECDSA P-256 сертификатов, ротация, SHA-256 TOFU отпечаток, FS персист
   storage.rs   — эфемерный in-RAM лог сообщений (TTL 72ч, sequence ids)
   protocol.rs  — бинарные wire-фреймы (опкоды 0x01–0x08)
   server.rs    — WebTransport эндпойнт, обработка сессий, broadcast relay
   tui.rs       — терминальный UI: Server Info header, лог-стрим, TOFU QR / fingerprint панель
-  logging.rs   — мост tracing → TUI / файл
+  logging.rs   — мост tracing → TUI / rolling-файл
   config.rs    — загрузка CLI + config.toml
   lib.rs       — связка + run() entry point
   main.rs      — бинарный entry point

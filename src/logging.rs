@@ -1,8 +1,8 @@
 //! Bridge between `tracing` and the TUI.
 //!
 //! We implement a minimal `tracing::Subscriber` that forwards every log event
-//! to the TUI's log channel. A `fmt` layer is also added for a rotating log
-//! file under `logs/` for post-hoc debugging.
+//! to the TUI's log channel. A `fmt` layer is also added for a rolling log
+//! file under `logs/` for post-hoc debugging (daily rotation, 7-day retention).
 
 use std::time::SystemTime;
 
@@ -78,24 +78,29 @@ impl<'a> tracing::field::Visit for MessageVisitor<'a> {
 }
 
 /// Install the global tracing subscriber, sending events to the TUI and
-/// a log file under `logs/`. Must be called once before logging.
+/// a rolling log file under `logs/`. Must be called once before logging.
 pub fn init_tracing(tui: TuiHandle, env_filter: &str) {
     let tui_layer = TuiLogLayer { tui };
 
-    use tracing_appender::rolling;
-    let file_layer = rolling::never("logs", "impulse-server.log");
+    use tracing_appender::rolling::{self, Rotation};
+    let file_layer = rolling::Builder::default()
+        .rotation(Rotation::DAILY)
+        .max_log_files(7)
+        .filename_prefix("impulse-server")
+        .filename_suffix(".log")
+        .build("logs")
+        .expect("failed to initialize rolling file logger");
 
-    let registry = tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(file_layer)
-                .with_timer(BracketTimer)
-                .with_ansi(false)
-                .with_filter(
-                    tracing_subscriber::EnvFilter::try_new(env_filter)
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-                ),
-        );
+    let registry = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(file_layer)
+            .with_timer(BracketTimer)
+            .with_ansi(false)
+            .with_filter(
+                tracing_subscriber::EnvFilter::try_new(env_filter)
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            ),
+    );
 
     // Try to set as global default; ignore error if already set.
     let _ = registry.with(tui_layer).try_init();

@@ -216,7 +216,7 @@ impl CertManager {
         })
     }
 
-    /// Generate a brand-new Ed25519 self-signed certificate and persist it.
+    /// Generate a brand-new ECDSA P-256 self-signed certificate and persist it.
     fn generate(dir: &Path, san: &[String]) -> anyhow::Result<Cert> {
         let now = SystemTime::now();
         let not_before: OffsetDateTime = to_offset(now);
@@ -425,14 +425,14 @@ impl DynamicCertResolver {
 
     /// Atomically swap in the rotated certificate.
     pub fn update(&self, key: Arc<CertifiedKey>) {
-        let mut guard = self.inner.write().unwrap();
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         guard.primary = key;
     }
 }
 
 impl ResolvesServerCert for DynamicCertResolver {
     fn resolve(&self, _client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        Some(self.inner.read().unwrap().primary.clone())
+        Some(self.inner.read().unwrap_or_else(|e| e.into_inner()).primary.clone())
     }
 }
 
@@ -441,73 +441,15 @@ fn to_offset(t: SystemTime) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(secs).unwrap_or(OffsetDateTime::UNIX_EPOCH)
 }
 
-/// Minimal X.509 validity parser (reads notBefore/notAfter as UTCTime).
-/// Returns None if the structure cannot be parsed.
+/// Parse X.509 validity period from a certificate DER using `x509-parser`.
 fn parse_validity(der: &CertificateDer<'static>) -> Option<(SystemTime, SystemTime)> {
-    let bytes = der.as_ref();
-    let mut times: Vec<SystemTime> = Vec::new();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if bytes[i] == 0x17 || bytes[i] == 0x18 {
-            let len = bytes[i + 1] as usize;
-            if i + 2 + len <= bytes.len() {
-                let slice = &bytes[i + 2..i + 2 + len];
-                if let Some(t) = parse_x509_time(slice) {
-                    times.push(t);
-                    if times.len() == 2 {
-                        break;
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    if times.len() == 2 {
-        Some((times[0], times[1]))
-    } else {
-        None
-    }
-}
-
-fn parse_x509_time(b: &[u8]) -> Option<SystemTime> {
-    let s = std::str::from_utf8(b).ok()?;
-    if !s.ends_with('Z') {
-        return None;
-    }
-    let digits = &s[..s.len() - 1];
-    let (year, rest): (i32, &str) = if digits.len() == 12 {
-        let yy: i32 = digits[0..2].parse().ok()?;
-        let year = if yy >= 50 { 1900 + yy } else { 2000 + yy };
-        (year, &digits[2..])
-    } else if digits.len() == 14 {
-        let yyyy: i32 = digits[0..4].parse().ok()?;
-        (yyyy, &digits[4..])
-    } else {
-        return None;
+    let (_, cert) = x509_parser::parse_x509_certificate(der.as_ref()).ok()?;
+    let validity = cert.validity();
+    let to_system = |t: x509_parser::time::ASN1Time| {
+        let secs = t.timestamp().max(0) as u64;
+        UNIX_EPOCH + Duration::from_secs(secs)
     };
-    let mo: u32 = rest[0..2].parse().ok()?;
-    let day: u32 = rest[2..4].parse().ok()?;
-    let h: u32 = rest[4..6].parse().ok()?;
-    let mi: u32 = rest[6..8].parse().ok()?;
-    let s: u32 = rest[8..10].parse().ok()?;
-
-    let days = days_from_civil(year, mo, day)?;
-    let secs = days * 86400 + h as i64 * 3600 + mi as i64 * 60 + s as i64;
-    Some(UNIX_EPOCH + Duration::from_secs(secs as u64))
-}
-
-/// Howard Hinnant's civil-date -> days since 1970-01-01 algorithm.
-fn days_from_civil(y: i32, m: u32, d: u32) -> Option<i64> {
-    let y = y as i64;
-    let m = m as i64;
-    let d = d as i64;
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146097 + doe - 719468;
-    if days < 0 { None } else { Some(days) }
+    Some((to_system(validity.not_before), to_system(validity.not_after)))
 }
 
 /// Replace the DACL of `path` with one that grants only the current user full

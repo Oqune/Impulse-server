@@ -1,4 +1,12 @@
-//! Unit tests for the wire protocol and in-memory storage.
+//! Unit and integration tests for the Impulse server.
+//!
+//! Covers:
+//! * Protocol encoding/decoding (opcodes, packet layout, byte order).
+//! * Certificate SHA-256 fingerprint derivation.
+//! * In-memory message store (append, sync, TTL sweep, ordering).
+//!
+//! Integration tests with a live WebTransport client are run separately
+//! via CI (see `.github/workflows/ci.yml`).
 
 #[cfg(test)]
 mod protocol_tests {

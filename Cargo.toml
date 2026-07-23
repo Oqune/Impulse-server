@@ -56,6 +56,9 @@ crossbeam-channel = "0.5"
 # Error handling
 anyhow = "1"
 
+# X.509 certificate parsing (validity period, issuer, etc.)
+x509-parser = { version = "0.17", default-features = false }
+
 # Hex encoding
 hex = "0.4"
 

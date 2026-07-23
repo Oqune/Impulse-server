@@ -71,8 +71,7 @@ impl MessageStore {
         };
         self.inner.insert(id, msg.clone());
         {
-            let mut order = self.order.lock().unwrap();
-            order.push(id);
+            let mut order = self.order.lock().unwrap_or_else(|e| e.into_inner());
             // Enforce the hard cap by dropping oldest entries.
             while order.len() > MAX_MESSAGES {
                 if let Some(oldest) = order.first().copied() {
@@ -91,7 +90,7 @@ impl MessageStore {
     /// (`limit`) prevents a single `Sync` from replaying the entire buffer and
     /// producing a multi-hundred-MB response (C3).
     pub fn since(&self, after_id: u64, limit: usize) -> Vec<StoredMessage> {
-        let order = self.order.lock().unwrap();
+        let order = self.order.lock().unwrap_or_else(|e| e.into_inner());
         order
             .iter()
             .copied()
@@ -119,7 +118,7 @@ impl MessageStore {
             self.inner.remove(&id);
         }
         if removed > 0 {
-            let mut order = self.order.lock().unwrap();
+            let mut order = self.order.lock().unwrap_or_else(|e| e.into_inner());
             order.retain(|id| self.inner.contains_key(id));
         }
         removed

@@ -1,22 +1,23 @@
 //! Terminal UI for the Impulse server.
 //!
-//! A **horizontal** two-panel layout: the **left** panel shows live `tracing` log
-//! output with timestamps, the **right** panel shows a centered QR code containing
-//! the TOFU trust payload (`impulse-cert:<fingerprint>`), the grouped fingerprint
-//! and a countdown to the next certificate rotation.
+//! 2‑column layout: a narrow **left** column with Info / QR square / Certificate,
+//! and the full‑height **right** column dedicated to live `tracing` log output.
+//! The QR code widget is centered **inside** a square card/block (its own quadrant),
+//! not having the card itself centered in the panel.
 //!
 //! The TUI owns its own thread and communicates with the rest of the app via
 //! channels: log records flow in through a `crossbeam_channel`, and the current
 //! certificate view is pushed in through a shared `Arc<Mutex<CertView>>`.
 
+use std::collections::HashSet;
 use std::io::Stdout;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use copypasta::{ClipboardContext, ClipboardProvider};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{self};
-use copypasta::{ClipboardContext, ClipboardProvider};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -30,15 +31,57 @@ use crate::cert::Cert;
 /// Max number of log lines retained for the TUI.
 const MAX_LOG_LINES: usize = 500;
 
-/// Preferred width of the right TOFU panel. The layout adapts gracefully when
-/// the terminal is smaller (see `draw`), so there is no minimum size.
-/// 72 cols fits the v4 QR code (`impulse-cert:<64-hex>` = 77 bytes → 33x33
-/// modules → 66 cols + quiet zone + borders).
-const TOFU_PANEL_WIDTH: u16 = 72;
+/// Mutable TUI state for scrolling and log filtering.
+struct TuiState {
+    /// Current scroll offset (lines from bottom). 0 = pinned to bottom.
+    scroll_offset: u16,
+    /// When true, new logs auto-scroll to bottom (default).
+    auto_scroll: bool,
+    /// Active log level filters. Empty = show all levels.
+    active_filters: HashSet<Level>,
+}
 
-/// Below this terminal width we drop the TOFU panel entirely and show only
-/// logs, since there is not enough room for a readable QR code.
-const MIN_SPLIT_WIDTH: u16 = 40;
+impl TuiState {
+    fn new() -> Self {
+        Self {
+            scroll_offset: 0,
+            auto_scroll: true,
+            active_filters: HashSet::new(),
+        }
+    }
+
+    /// Returns true if the given level passes the current filter.
+    fn level_visible(&self, level: &Level) -> bool {
+        self.active_filters.is_empty() || self.active_filters.contains(level)
+    }
+
+    /// Toggle a log level filter on/off (pure toggle, no side effects).
+    fn toggle_filter(&mut self, level: Level) {
+        if !self.active_filters.insert(level) {
+            self.active_filters.remove(&level);
+        }
+    }
+
+    /// Scroll to the very bottom (manual call from End key).
+    fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = 0;
+    }
+
+    /// Scroll up by `amount` lines.
+    fn scroll_up(&mut self, amount: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_add(amount);
+    }
+
+    /// Scroll down by `amount` lines (clamps at 0).
+    fn scroll_down(&mut self, amount: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+    }
+
+    /// Jump to top of logs.
+    fn scroll_to_top(&mut self) {
+        self.scroll_offset = u16::MAX; // draw_logs will clamp
+    }
+}
 
 /// Snapshot of certificate state shown in the right panel.
 #[derive(Clone, Default)]
@@ -117,22 +160,17 @@ pub struct TuiHandle {
 
 impl TuiHandle {
     pub fn push_log(&self, rec: LogRecord) {
-        // Non-blocking: if the TUI is saturated we drop the line rather than
-        // block the async runtime.
         let _ = self.log_tx.try_send(rec);
     }
 
-    /// Update the certificate view (e.g. after a rotation).
     pub fn set_cert(&self, view: CertView) {
-        *self.cert.lock().unwrap() = view;
+        *self.cert.lock().unwrap_or_else(|e| e.into_inner()) = view;
     }
 
-    /// Refresh the static server technical info shown above the logs.
     pub fn set_info(&self, info: ServerInfo) {
-        *self.info.lock().unwrap() = info;
+        *self.info.lock().unwrap_or_else(|e| e.into_inner()) = info;
     }
 
-    /// Refresh the live session / message counters shown in the TUI.
     pub fn set_stats(&self, sessions: usize, messages: usize) {
         self.session_count.store(sessions, Ordering::Relaxed);
         self.message_count.store(messages, Ordering::Relaxed);
@@ -140,8 +178,6 @@ impl TuiHandle {
 }
 
 /// Run the TUI loop on the current thread until the user quits (Ctrl+C / 'q').
-///
-/// Returns when the UI should close; the server is expected to shut down too.
 pub fn run_tui(
     log_rx: crossbeam_channel::Receiver<LogRecord>,
     cert: Arc<Mutex<CertView>>,
@@ -160,11 +196,11 @@ pub fn run_tui(
     let mut terminal = Terminal::new(backend)?;
 
     let mut logs: Vec<LogRecord> = Vec::with_capacity(MAX_LOG_LINES);
-    let mut last_tick = std::time::Instant::now();
     let mut last_copy: Option<SystemTime> = None;
     let clipboard_result = ClipboardContext::new();
     let has_clipboard = clipboard_result.is_ok();
     let mut clipboard = clipboard_result.ok();
+    let mut state = TuiState::new();
 
     loop {
         while let Ok(rec) = log_rx.try_recv() {
@@ -175,22 +211,38 @@ pub fn run_tui(
             }
         }
 
+        let filtered: Vec<&LogRecord> = logs
+            .iter()
+            .filter(|r| state.level_visible(&r.level))
+            .collect();
+
         let stats = (
             stats.0.load(Ordering::Relaxed),
             stats.1.load(Ordering::Relaxed),
         );
-        let info = info.lock().unwrap().clone();
-        draw(&mut terminal, &logs, &cert.lock().unwrap(), &stats, &info, has_clipboard, &mut last_copy)?;
+        let info = info.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        draw(
+            &mut terminal,
+            &filtered,
+            &cert.lock().unwrap_or_else(|e| e.into_inner()),
+            &stats,
+            &info,
+            has_clipboard,
+            &mut last_copy,
+            &state,
+        )?;
 
         if event::poll(Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
         {
+            // Ctrl+C / q — quit
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
                 || key.code == KeyCode::Char('q')
             {
                 shutdown.notify_one();
                 break;
             }
+            // Shift+C — copy all logs to clipboard
             if has_clipboard
                 && key.code == KeyCode::Char('C')
                 && key.modifiers.contains(KeyModifiers::SHIFT)
@@ -198,9 +250,22 @@ pub fn run_tui(
                 copy_logs_to_clipboard(&logs, &mut clipboard);
                 last_copy = Some(SystemTime::now());
             }
-        }
-        if last_tick.elapsed() >= Duration::from_millis(250) {
-            last_tick = std::time::Instant::now();
+            match key.code {
+                // Scrolling
+                KeyCode::Up => state.scroll_up(1),
+                KeyCode::Down => state.scroll_down(1),
+                KeyCode::PageUp => state.scroll_up(20),
+                KeyCode::PageDown => state.scroll_down(20),
+                KeyCode::Home => state.scroll_to_top(),
+                KeyCode::End => state.scroll_to_bottom(),
+                // Log level filter toggles
+                KeyCode::Char('1') => state.toggle_filter(Level::TRACE),
+                KeyCode::Char('2') => state.toggle_filter(Level::DEBUG),
+                KeyCode::Char('3') => state.toggle_filter(Level::INFO),
+                KeyCode::Char('4') => state.toggle_filter(Level::WARN),
+                KeyCode::Char('5') => state.toggle_filter(Level::ERROR),
+                _ => {}
+            }
         }
     }
 
@@ -208,7 +273,6 @@ pub fn run_tui(
     crossterm::execute!(
         terminal.backend_mut(),
         terminal::LeaveAlternateScreen,
-        crossterm::event::DisableMouseCapture
     )?;
     terminal.show_cursor()?;
 
@@ -217,57 +281,181 @@ pub fn run_tui(
 
 fn draw(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    logs: &[LogRecord],
+    filtered: &[&LogRecord],
     cert: &CertView,
     stats: &(usize, usize),
     info: &ServerInfo,
     has_clipboard: bool,
     last_copy: &mut Option<SystemTime>,
+    state: &TuiState,
 ) -> anyhow::Result<()> {
     terminal.draw(|f| {
         let area = f.area();
 
-        let left = |f: &mut ratatui::Frame, area: Rect| {
-            let info_h = 7u16.min(area.height);
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(info_h), // server info
-                    Constraint::Min(3),         // logs
-                ])
-                .split(area);
-            draw_info(f, chunks[0], info, cert, stats, has_clipboard, last_copy);
-            draw_logs(f, chunks[1], logs);
-        };
-
-        if area.width >= MIN_SPLIT_WIDTH + TOFU_PANEL_WIDTH {
-            let tofu_w = TOFU_PANEL_WIDTH.min(area.width.saturating_sub(MIN_SPLIT_WIDTH));
-            let chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Min(MIN_SPLIT_WIDTH), // logs panel
-                    Constraint::Length(tofu_w),       // TOFU panel
-                ])
-                .split(area);
-
-            left(f, chunks[0]);
-            draw_tofu(f, chunks[1], cert);
-        } else {
-            left(f, area);
+        if area.width < 80 || area.height < 10 {
+            draw_compact(f, area, filtered, state);
+            return;
         }
+
+        if area.width < 112 || area.height < 30 {
+            // Medium: help bar + logs only
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(5)])
+                .split(area);
+            draw_help_bar(f, rows[0], state, has_clipboard, last_copy);
+            draw_logs(f, rows[1], filtered, state);
+            return;
+        }
+
+        // Full layout: left column (info+QR+cert) + right column (help bar + logs)
+        let left_w = 60u16.min(area.width.saturating_sub(40));
+
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(left_w), Constraint::Min(40)])
+            .split(area);
+
+        let left_h = cols[0].height;
+        let info_h = 8u16.min(left_h / 3);
+        let cert_h = 7u16.min(left_h / 3);
+        let qr_h = left_h.saturating_sub(info_h + cert_h);
+        let qr_side = left_w.min(qr_h);
+
+        let left_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(info_h),
+                Constraint::Length(qr_side),
+                Constraint::Length(cert_h),
+            ])
+            .split(cols[0]);
+
+        let right_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(5)])
+            .split(cols[1]);
+
+        draw_info(f, left_rows[0], info, cert, stats, has_clipboard, last_copy);
+        draw_qr(f, left_rows[1], cert);
+        draw_cert_info(f, left_rows[2], cert);
+        draw_help_bar(f, right_rows[0], state, has_clipboard, last_copy);
+        draw_logs(f, right_rows[1], filtered, state);
     })?;
     Ok(())
 }
 
-/// Compact technical-information block rendered above the logs.
+/// Compact view for very small terminals.
+fn draw_compact(f: &mut ratatui::Frame, area: Rect, filtered: &[&LogRecord], state: &TuiState) {
+    draw_logs(f, area, filtered, state);
+}
+
+/// Top help bar: shows keybindings and active filter state on a single line.
+fn draw_help_bar(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    state: &TuiState,
+    has_clipboard: bool,
+    last_copy: &Option<SystemTime>,
+) {
+    let mut spans = Vec::new();
+
+    // Filter indicators — colored pills showing which levels are on
+    let all_active = state.active_filters.is_empty();
+    let filter_defs: &[(Level, &str, Color)] = &[
+        (Level::TRACE, "1:TRC", Color::DarkGray),
+        (Level::DEBUG, "2:DBG", Color::Magenta),
+        (Level::INFO,  "3:INF", Color::Cyan),
+        (Level::WARN,  "4:WRN", Color::Yellow),
+        (Level::ERROR, "5:ERR", Color::Red),
+    ];
+
+    spans.push(Span::styled(
+        " Filters: ",
+        Style::default().fg(Color::Gray),
+    ));
+
+    for (level, label, color) in filter_defs {
+        let active = all_active || state.active_filters.contains(level);
+        let style = if active {
+            Style::default().fg(*color).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        spans.push(Span::styled(format!("[{}]", label), style));
+        spans.push(Span::raw(" "));
+    }
+
+    if all_active {
+        spans.push(Span::styled(
+            "all ON",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        let count = state.active_filters.len();
+        spans.push(Span::styled(
+            format!("{} on", count),
+            Style::default().fg(Color::Green),
+        ));
+    }
+
+    // Separator
+    spans.push(Span::styled("  │  ", Style::default().fg(Color::DarkGray)));
+
+    // Scroll hint
+    let scroll_txt = if state.auto_scroll {
+        Span::styled(
+            "↑↓ scroll (End=bottom)",
+            Style::default().fg(Color::DarkGray),
+        )
+    } else {
+        Span::styled(
+            "↑↓ scrolling  End=back to live",
+            Style::default().fg(Color::Yellow),
+        )
+    };
+    spans.push(scroll_txt);
+
+    // Separator
+    spans.push(Span::styled("  │  ", Style::default().fg(Color::DarkGray)));
+
+    // Copy / quit
+    if has_clipboard {
+        spans.push(Span::styled(
+            "Shift+C=copy logs",
+            Style::default().fg(Color::DarkGray),
+        ));
+        spans.push(Span::raw("  "));
+    }
+    spans.push(Span::styled(
+        "Ctrl+C quit",
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    // Copy confirmation flash
+    if let Some(t) = last_copy {
+        if t.elapsed().unwrap_or_default() < Duration::from_secs(2) {
+            spans.push(Span::styled(
+                "  ✓ copied",
+                Style::default().fg(Color::Green),
+            ));
+        }
+    }
+
+    let bar = Paragraph::new(Line::from(spans));
+    f.render_widget(bar, area);
+}
+
 fn draw_info(
     f: &mut ratatui::Frame,
     area: Rect,
     info: &ServerInfo,
     cert: &CertView,
     stats: &(usize, usize),
-    has_clipboard: bool,
-    last_copy: &Option<SystemTime>,
+    _has_clipboard: bool,
+    _last_copy: &Option<SystemTime>,
 ) {
     let fp = if cert.fingerprint_raw.len() >= 16 {
         &cert.fingerprint_raw[..16]
@@ -281,7 +469,7 @@ fn draw_info(
         (expires % 3600) / 60,
         expires % 60,
     );
-    let mut lines = vec![
+    let lines = vec![
         Line::from(vec![
             Span::styled("Listen: ", Style::default().fg(Color::Gray)),
             Span::styled(
@@ -290,75 +478,55 @@ fn draw_info(
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("   Transport: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                "WebTransport/QUIC TLS1.3 (h3)",
-                Style::default().fg(Color::Cyan),
-            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Transport: ", Style::default().fg(Color::Gray)),
+            Span::styled("WebTransport/QUIC", Style::default().fg(Color::Cyan)),
         ]),
         Line::from(vec![
             Span::styled("Version: ", Style::default().fg(Color::Gray)),
             Span::raw(info.version.clone()),
-            Span::styled("   SANS: ", Style::default().fg(Color::Gray)),
-            Span::raw(format!("{}", info.san_count)),
-            Span::styled("   Max sessions: ", Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(vec![
+            Span::styled("Sessions: ", Style::default().fg(Color::Gray)),
             Span::raw(format!("{}/{}", stats.0, info.max_sessions)),
-        ]),
-        Line::from(vec![
-            Span::styled("Messages: ", Style::default().fg(Color::Gray)),
+            Span::styled("  Msgs: ", Style::default().fg(Color::Gray)),
             Span::raw(format!("{}", stats.1)),
-            Span::styled("   TTL: ", Style::default().fg(Color::Gray)),
-            Span::raw(format!("{}h", info.ttl_hours)),
-            Span::styled("   Max payload: ", Style::default().fg(Color::Gray)),
-            Span::raw(format!("{} KB", info.max_payload / 1024)),
         ]),
         Line::from(vec![
-            Span::styled("Cert fingerprint: ", Style::default().fg(Color::Gray)),
+            Span::styled("TTL: ", Style::default().fg(Color::Gray)),
+            Span::raw(format!("{}h", info.ttl_hours)),
+            Span::styled("  Payload: ", Style::default().fg(Color::Gray)),
+            Span::raw(format!("{}KB", info.max_payload / 1024)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Cert: ", Style::default().fg(Color::Gray)),
             Span::styled(
                 fp.to_string(),
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
-        ]),
-        Line::from(vec![
-            Span::styled("Cert expires in: ", Style::default().fg(Color::Gray)),
-            Span::raw(format!("{}d {}h {}m {}s", d, h, m, s)),
+            Span::raw("  "),
             if cert.rotating {
-                Span::styled("   ⚠ rotating", Style::default().fg(Color::Yellow))
+                Span::styled("⚠", Style::default().fg(Color::Yellow))
             } else {
                 Span::raw("")
             },
         ]),
-        Line::from(""),
         Line::from(vec![
-            Span::styled("Press 'q' / Ctrl+C to stop", Style::default().fg(Color::DarkGray)),
-            if has_clipboard {
-                Span::raw("   ")
-            } else {
-                Span::raw("")
-            },
-            if has_clipboard {
-                Span::styled("Shift+C to copy logs", Style::default().fg(Color::DarkGray))
-            } else {
-                Span::raw("")
-            },
+            Span::styled("Exp: ", Style::default().fg(Color::Gray)),
+            Span::raw(format!("{}d {}h {}m {}s", d, h, m, s)),
         ]),
     ];
-    if let Some(t) = last_copy {
-        if t.elapsed().unwrap_or_default() < Duration::from_secs(2) {
-            lines.push(Line::from(Span::styled(
-                "✓ Logs copied to clipboard",
-                Style::default().fg(Color::Green),
-            )));
-        }
-    }
 
     let block = Paragraph::new(lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Server Info ")
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .title(" Info ")
                 .border_style(Style::default().fg(Color::Gray))
                 .padding(ratatui::widgets::Padding::uniform(1)),
         )
@@ -366,8 +534,8 @@ fn draw_info(
     f.render_widget(block, area);
 }
 
-fn draw_logs(f: &mut ratatui::Frame, area: Rect, logs: &[LogRecord]) {
-    let lines: Vec<Line> = logs
+fn draw_logs(f: &mut ratatui::Frame, area: Rect, filtered: &[&LogRecord], state: &TuiState) {
+    let lines: Vec<Line> = filtered
         .iter()
         .map(|rec| {
             let color = match rec.level {
@@ -384,7 +552,6 @@ fn draw_logs(f: &mut ratatui::Frame, area: Rect, logs: &[LogRecord]) {
                 Level::DEBUG => "DBG",
                 Level::TRACE => "TRC",
             };
-            // Format timestamp: [HH:MM:SS.mmm]
             let ts = rec.timestamp.duration_since(UNIX_EPOCH).unwrap_or_default();
             let secs = ts.as_secs();
             let millis = ts.subsec_millis();
@@ -410,29 +577,32 @@ fn draw_logs(f: &mut ratatui::Frame, area: Rect, logs: &[LogRecord]) {
         })
         .collect();
 
-    // Paragraph (not List) so long messages wrap inside the panel instead of
-    // being truncated.
+    // Scroll: auto_scroll = always pinned to bottom; manual = use scroll_offset
+    let usable = area.height.saturating_sub(2) as usize; // borders = 2
+    let total = filtered.len();
+    let scroll_y = if state.auto_scroll {
+        if total > usable {
+            (total - usable) as u16
+        } else {
+            0
+        }
+    } else {
+        let max_scroll = if total > usable { (total - usable) as u16 } else { 0 };
+        state.scroll_offset.min(max_scroll)
+    };
+
     let paragraph = Paragraph::new(lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Impulse Server — Logs ")
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .title(" Logs ")
                 .border_style(Style::default().fg(Color::Gray))
                 .padding(ratatui::widgets::Padding::uniform(1)),
         )
         .wrap(Wrap { trim: false })
-        .scroll((scroll_for_logs(area, logs.len()), 0));
+        .scroll((scroll_y, 0));
     f.render_widget(paragraph, area);
-}
-
-/// Keep the view pinned to the newest log lines when there are more than fit.
-fn scroll_for_logs(area: Rect, total: usize) -> u16 {
-    let usable = area.height.saturating_sub(2) as usize; // minus borders/padding
-    if total > usable {
-        (total - usable) as u16
-    } else {
-        0
-    }
 }
 
 fn copy_logs_to_clipboard(logs: &[LogRecord], clipboard: &mut Option<ClipboardContext>) {
@@ -465,70 +635,42 @@ fn copy_logs_to_clipboard(logs: &[LogRecord], clipboard: &mut Option<ClipboardCo
     }
 }
 
-fn draw_tofu(f: &mut ratatui::Frame, area: Rect, cert: &CertView) {
-    // The right panel is split vertically: QR on top (centered), info below.
-    // The payload `impulse-cert:<64-hex>` (77 bytes) encodes as a v4 QR code
-    // with error-correction level L: 33x33 modules → 66 cols x 33 rows.
-    // When the terminal is too small for that, the QR block collapses to a
-    // hint and the fingerprint below remains the manual fallback.
-    const QR_WIDGET_COLS: u16 = 66;
-    const QR_WIDGET_ROWS: u16 = 33;
-
-    let qr_fits = area.width >= QR_WIDGET_COLS + 2 && area.height >= QR_WIDGET_ROWS + 12;
-    let qr_rows = if qr_fits {
-        QR_WIDGET_ROWS + 2
-    } else {
-        5 // collapsed hint block
-    }
-    .min(area.height);
-    let info_rows = area.height.saturating_sub(qr_rows);
-    let inner = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(qr_rows),          // QR code area (with border)
-            Constraint::Length(info_rows.max(1)), // info area
-        ])
-        .split(area);
-
-    // QR code with border - center it within the allocated rect.
-    let qr_outer_block = Block::default()
+fn draw_qr(f: &mut ratatui::Frame, area: Rect, cert: &CertView) {
+    let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Scan to trust (TOFU) ")
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(" QR — TOFU ")
         .border_style(Style::default().fg(Color::Gray));
-    let qr_inner = qr_outer_block.inner(inner[0]);
-    f.render_widget(qr_outer_block, inner[0]);
 
-    if qr_fits {
-        let qr_widget_area = centered_rect(
-            QR_WIDGET_COLS.min(qr_inner.width),
-            QR_WIDGET_ROWS.min(qr_inner.height),
-            qr_inner,
-        );
-        let qr_string = cert.tofu_qr_string();
-        // ECL::L keeps the code at v4 (77 bytes fit); the default ECL::M would
-        // bump it to v5, which no longer fits the panel. Quiet zone is skipped —
-        // the dark block border already separates the code from the frame.
-        match qrcode::QrCode::with_error_correction_level(&qr_string, qrcode::EcLevel::L) {
-            Ok(qr) => {
-                let widget = tui_qrcode::QrCodeWidget::new(qr)
-                    .quiet_zone(tui_qrcode::QuietZone::Disabled);
-                f.render_widget(widget, qr_widget_area);
-            }
-            Err(_) => {
-                let p = Paragraph::new("QR encode error")
-                    .style(Style::default().fg(Color::Red))
-                    .alignment(Alignment::Center);
-                f.render_widget(p, qr_widget_area);
-            }
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let qr_string = cert.tofu_qr_string();
+    match qrcode::QrCode::with_error_correction_level(&qr_string, qrcode::EcLevel::L) {
+        Ok(qr) => {
+            let cols = qr.width() as u16;
+            let rows = ((qr.width() + 1) / 2) as u16;
+
+            let widget_w = cols.min(inner.width);
+            let widget_h = rows.min(inner.height);
+
+            let centered = centered_rect(widget_w, widget_h, inner);
+
+            let widget = tui_qrcode::QrCodeWidget::new(qr)
+                .quiet_zone(tui_qrcode::QuietZone::Disabled);
+            f.render_widget(widget, centered);
         }
-    } else {
-        let p = Paragraph::new("Terminal too small for QR —\nenter the fingerprint below\nmanually in the client.")
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(Alignment::Center);
-        f.render_widget(p, qr_inner);
+        Err(_) => {
+            let p = Paragraph::new("QR encode error")
+                .style(Style::default().fg(Color::Red))
+                .alignment(Alignment::Center);
+            f.render_widget(p, inner);
+        }
     }
+}
 
-    // Right side: full grouped fingerprint + issue time + rotation status.
+/// Certificate fingerprint info rendered in the bottom‑left slot.
+fn draw_cert_info(f: &mut ratatui::Frame, area: Rect, cert: &CertView) {
     let expires = cert.expires_in;
     let (d, h, m, s) = (
         expires / 86400,
@@ -536,65 +678,63 @@ fn draw_tofu(f: &mut ratatui::Frame, area: Rect, cert: &CertView) {
         (expires % 3600) / 60,
         expires % 60,
     );
+
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("Fingerprint: ", Style::default().fg(Color::Gray)),
+            Span::styled("Fingerprint:", Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(Span::styled(
+            cert.fingerprint_grouped.clone(),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Valid for: ", Style::default().fg(Color::Gray)),
             Span::styled(
-                cert.fingerprint_grouped.clone(),
+                format!("{}d {}h {}m {}s", d, h, m, s),
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
-        Line::from(""),
         Line::from(vec![
-            Span::styled("Cert valid for: ", Style::default().fg(Color::Gray)),
-            Span::raw(format!("{}d {}h {}m {}s", d, h, m, s)),
-        ]),
-        Line::from(vec![
-            Span::styled("Issued at: ", Style::default().fg(Color::Gray)),
+            Span::styled("Issued: ", Style::default().fg(Color::Gray)),
             Span::raw(format_unix(cert.issued_at)),
         ]),
     ];
     if cert.rotating {
+        lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "⚠ Rotating (overlap active)",
+            "⚠ Rotating (overlap)",
             Style::default().fg(Color::Yellow),
         )));
     }
-    lines.push(Line::from(""));
 
     let info = Paragraph::new(lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Trust & Rotation ")
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .title(" Certificate ")
                 .border_style(Style::default().fg(Color::Gray))
                 .padding(ratatui::widgets::Padding::uniform(1)),
         )
         .wrap(Wrap { trim: true });
-    f.render_widget(info, inner[1]);
+    f.render_widget(info, area);
 }
 
 /// Helper to create a centered rect of given width/height within `r`.
 fn centered_rect(width: u16, height: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(width),
-            Constraint::Min(0),
-        ])
-        .split(r);
-
-    Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(height),
-            Constraint::Min(0),
-        ])
-        .split(popup_layout[1])[1]
+    let width = width.min(r.width);
+    let height = height.min(r.height);
+    Rect {
+        x: r.x + (r.width - width) / 2,
+        y: r.y + (r.height - height) / 2,
+        width,
+        height,
+    }
 }
 
 fn format_unix(secs: u64) -> String {

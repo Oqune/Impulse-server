@@ -41,7 +41,11 @@ fn opcode_name(b: u8) -> &'static str {
 
 fn hex_dump(bytes: &[u8], max: usize) -> String {
     let show = bytes.len().min(max);
-    let hex: String = bytes[..show].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+    let hex: String = bytes[..show]
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join(" ");
     if bytes.len() > max {
         format!("{}... ({} bytes total)", hex, bytes.len())
     } else {
@@ -120,7 +124,7 @@ impl RelayServer {
         let (tls_config, cert_resolver) =
             cert_manager
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .build_dynamic_tls_config()
                 .map_err(|e| anyhow::anyhow!("failed to build TLS config: {}", e))?;
         let session_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_SESSIONS));
@@ -184,7 +188,7 @@ impl RelayServer {
             "TOFU fingerprint: {}",
             self.cert_manager
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .current()
                 .fingerprint_grouped()
         );
@@ -205,18 +209,14 @@ impl RelayServer {
                     break;
                 }
                 Next::Session(incoming_session) => {
-                    let incoming_request = match tokio::time::timeout(
-                        HANDSHAKE_TIMEOUT,
-                        incoming_session,
-                    )
-                    .await
-                    {
-                        Ok(r) => r,
-                        Err(_) => {
-                            warn!("Session handshake timed out");
-                            continue;
-                        }
-                    };
+                    let incoming_request =
+                        match tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming_session).await {
+                            Ok(r) => r,
+                            Err(_) => {
+                                warn!("Session handshake timed out");
+                                continue;
+                            }
+                        };
                     let connection = match incoming_request {
                         Ok(r) => match r.accept().await {
                             Ok(c) => c,
@@ -230,8 +230,12 @@ impl RelayServer {
                             continue;
                         }
                     };
-                    info!("[CONNECT] New WebTransport session: {} from {} (cert SANs: {:?})",
-                        connection.session_id().into_u64(), connection.remote_address(), self.config.san);
+                    info!(
+                        "[CONNECT] New WebTransport session: {} from {} (cert SANs: {:?})",
+                        connection.session_id().into_u64(),
+                        connection.remote_address(),
+                        self.config.san
+                    );
 
                     // Per-IP rate limiting: reject if too many recent connections
                     // from the same address (within RATE_LIMIT_WINDOW).
@@ -275,13 +279,15 @@ impl RelayServer {
     /// connection is allowed, `false` if it should be rejected.
     fn check_rate_limit(&self, remote_ip: IpAddr) -> bool {
         let now = Instant::now();
-        let mut ip_map = self.ip_connections.lock().unwrap();
+        let mut ip_map = self.ip_connections.lock().unwrap_or_else(|e| e.into_inner());
         let times = ip_map.entry(remote_ip).or_default();
         times.retain(|t| now.duration_since(*t) < RATE_LIMIT_WINDOW);
         if times.len() >= MAX_CONNECTIONS_PER_IP {
             warn!(
                 "Rate limit hit for {} ({} connections in {:?})",
-                remote_ip, times.len(), RATE_LIMIT_WINDOW
+                remote_ip,
+                times.len(),
+                RATE_LIMIT_WINDOW
             );
             return false;
         }
@@ -308,7 +314,10 @@ impl RelayServer {
         // so the two endpoints ended up on different streams and no data flowed
         // in either direction (session handshake succeeded, but auth/relay never
         // worked).
-        info!("[STREAM] Session {} waiting to accept bidirectional stream...", session_key);
+        info!(
+            "[STREAM] Session {} waiting to accept bidirectional stream...",
+            session_key
+        );
         let (send_stream, recv_stream) = match connection.accept_bi().await {
             Ok(pair) => {
                 info!("[STREAM] Session {} stream accepted OK", session_key);
@@ -445,13 +454,25 @@ impl RelayServer {
                             break; // EOF
                         }
                         Ok(Ok(n)) => {
-                            info!("[READER] Session {} raw chunk: {} bytes", session_key, n);
-                            info!("[READER] Session {} hex: {}", session_key, hex_dump(&chunk[..n], 128));
+                            debug!("[READER] Session {} raw chunk: {} bytes", session_key, n);
+                            debug!(
+                                "[READER] Session {} hex: {}",
+                                session_key,
+                                hex_dump(&chunk[..n], 128)
+                            );
                             buf.extend_from_slice(&chunk[..n]);
-                            info!("[READER] Session {} buffer now {} bytes", session_key, buf.len());
+                            debug!(
+                                "[READER] Session {} buffer now {} bytes",
+                                session_key,
+                                buf.len()
+                            );
                             if buf.len() > MAX_STREAM_BUFFER {
-                                info!("[READER] Session {} BUFFER OVERFLOW ({} > {}), closing",
-                                    session_key, buf.len(), MAX_STREAM_BUFFER);
+                                info!(
+                                    "[READER] Session {} BUFFER OVERFLOW ({} > {}), closing",
+                                    session_key,
+                                    buf.len(),
+                                    MAX_STREAM_BUFFER
+                                );
                                 break;
                             }
                             // Process all complete packets.
@@ -459,15 +480,28 @@ impl RelayServer {
                                 match try_read_packet(&buf) {
                                     Ok(Some(packet_len)) => {
                                         if packet_len > buf.len() {
-                                            info!("[READER] Session {} partial packet: declared {} but buffer has {}, waiting",
-                                                session_key, packet_len, buf.len());
+                                            info!(
+                                                "[READER] Session {} partial packet: declared {} but buffer has {}, waiting",
+                                                session_key,
+                                                packet_len,
+                                                buf.len()
+                                            );
                                             break;
                                         }
                                         let packet_data: Vec<u8> =
                                             buf.drain(..packet_len).collect();
-                                        let op = if packet_data.is_empty() { 0 } else { packet_data[0] };
-                                        info!("[READER] Session {} -> opcode=0x{:02x} ({}) total_packet={} bytes",
-                                            session_key, op, opcode_name(op), packet_len);
+                                        let op = if packet_data.is_empty() {
+                                            0
+                                        } else {
+                                            packet_data[0]
+                                        };
+                                        info!(
+                                            "[READER] Session {} -> opcode=0x{:02x} ({}) total_packet={} bytes",
+                                            session_key,
+                                            op,
+                                            opcode_name(op),
+                                            packet_len
+                                        );
                                         if let Err(e) = this
                                             .process_packet(
                                                 session_key,
@@ -477,19 +511,27 @@ impl RelayServer {
                                             )
                                             .await
                                         {
-                                            info!("[READER] Session {} packet error: {} (authenticated={})",
-                                                session_key, e, authenticated);
+                                            info!(
+                                                "[READER] Session {} packet error: {} (authenticated={})",
+                                                session_key, e, authenticated
+                                            );
                                             break;
                                         }
                                     }
                                     Ok(None) => {
-                                        info!("[READER] Session {} incomplete packet, waiting for more data (buf={} bytes)",
-                                            session_key, buf.len());
+                                        info!(
+                                            "[READER] Session {} incomplete packet, waiting for more data (buf={} bytes)",
+                                            session_key,
+                                            buf.len()
+                                        );
                                         break; // incomplete, wait for more data
                                     }
                                     Err(()) => {
-                                        info!("[READER] Session {} UNKNOWN OPCODE in buffer (first byte=0x{:02x}), closing",
-                                            session_key, if buf.is_empty() { 0 } else { buf[0] });
+                                        info!(
+                                            "[READER] Session {} UNKNOWN OPCODE in buffer (first byte=0x{:02x}), closing",
+                                            session_key,
+                                            if buf.is_empty() { 0 } else { buf[0] }
+                                        );
                                         break;
                                     }
                                 }
@@ -500,18 +542,27 @@ impl RelayServer {
                             break;
                         }
                         Err(_) => {
-                            info!("[READER] Session {} IDLE TIMEOUT ({}s, no data from client)",
-                                session_key, SESSION_IDLE_TIMEOUT.as_secs());
+                            info!(
+                                "[READER] Session {} IDLE TIMEOUT ({}s, no data from client)",
+                                session_key,
+                                SESSION_IDLE_TIMEOUT.as_secs()
+                            );
                             break;
                         }
                     }
                 }
-                info!("[READER] Session {} reader task ended (authenticated={})", session_key, authenticated);
+                info!(
+                    "[READER] Session {} reader task ended (authenticated={})",
+                    session_key, authenticated
+                );
             })
         };
 
         // Wait for either task to finish, then clean up.
-        info!("[SESSION] Session {} waiting for writer/reader tasks to finish...", session_key);
+        info!(
+            "[SESSION] Session {} waiting for writer/reader tasks to finish...",
+            session_key
+        );
         tokio::select! {
             _ = writer_task => {
                 info!("[SESSION] Session {} writer task finished first", session_key);
@@ -520,12 +571,18 @@ impl RelayServer {
                 info!("[SESSION] Session {} reader task finished first", session_key);
             },
         }
-        info!("[SESSION] Session {} CLOSED (sessions_left={})",
-            session_key, self.sessions.len().saturating_sub(1));
+        info!(
+            "[SESSION] Session {} CLOSED (sessions_left={})",
+            session_key,
+            self.sessions.len().saturating_sub(1)
+        );
         self.sessions.remove(&session_key);
         self.tui.set_stats(self.sessions.len(), self.store.len());
-        info!("[SESSION] Session {} cleanup complete, remaining sessions={}",
-            session_key, self.sessions.len());
+        info!(
+            "[SESSION] Session {} cleanup complete, remaining sessions={}",
+            session_key,
+            self.sessions.len()
+        );
     }
 
     async fn process_packet(
@@ -547,10 +604,18 @@ impl RelayServer {
                 let password_hash_str = String::from_utf8(password_hash)
                     .map_err(|_| anyhow::anyhow!("invalid UTF-8 in password"))?;
 
-                info!("[AUTH] Session {} got password_hash='{}' ({} hex chars)",
-                    session_key, &password_hash_str[..8], password_hash_str.len());
-                info!("[AUTH] Session {} stored hash='{}' ({} hex chars)",
-                    session_key, &self.password_hash[..8], self.password_hash.len());
+                info!(
+                    "[AUTH] Session {} got password_hash='{}' ({} hex chars)",
+                    session_key,
+                    &password_hash_str[..8],
+                    password_hash_str.len()
+                );
+                info!(
+                    "[AUTH] Session {} stored hash='{}' ({} hex chars)",
+                    session_key,
+                    &self.password_hash[..8],
+                    self.password_hash.len()
+                );
 
                 use subtle::ConstantTimeEq;
                 let ok = password_hash_str
@@ -563,8 +628,12 @@ impl RelayServer {
                     ok,
                     if ok { None } else { Some("Invalid password") },
                 );
-                info!("[AUTH] Session {} sending AuthResult: success={} packet_len={}",
-                    session_key, ok, response.len());
+                info!(
+                    "[AUTH] Session {} sending AuthResult: success={} packet_len={}",
+                    session_key,
+                    ok,
+                    response.len()
+                );
 
                 direct_tx
                     .send(response)
@@ -576,7 +645,10 @@ impl RelayServer {
                     info!("[AUTH] Session {} auth FAILED -> closing", session_key);
                     return Err(anyhow::anyhow!("authentication failed"));
                 }
-                info!("[AUTH] Session {} auth SUCCESS -> authenticated=true", session_key);
+                info!(
+                    "[AUTH] Session {} auth SUCCESS -> authenticated=true",
+                    session_key
+                );
                 Ok(())
             }
             Opcode::Sync => {
@@ -585,14 +657,21 @@ impl RelayServer {
                     return Err(anyhow::anyhow!("not authenticated"));
                 }
                 let last_seen_id = reader.read_u64().map_err(|e| anyhow::anyhow!("{}", e))?;
-                info!("[SYNC] Session {} sync request last_seen_id={}", session_key, last_seen_id);
+                info!(
+                    "[SYNC] Session {} sync request last_seen_id={}",
+                    session_key, last_seen_id
+                );
 
                 let replay = self.store.since(last_seen_id, MAX_SYNC_MESSAGES);
                 let messages: Vec<(u64, u64, Vec<u8>)> = replay
                     .into_iter()
                     .map(|m| (m.id, m.timestamp, m.payload))
                     .collect();
-                info!("[SYNC] Session {} returning {} messages", session_key, messages.len());
+                info!(
+                    "[SYNC] Session {} returning {} messages",
+                    session_key,
+                    messages.len()
+                );
 
                 let response = ServerPacketEncoder::sync_response(&messages);
                 direct_tx
@@ -609,17 +688,27 @@ impl RelayServer {
                 let payload = reader
                     .read_len_prefixed()
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
-                info!("[DATA] Session {} data payload={} bytes",
-                    session_key, payload.len());
+                info!(
+                    "[DATA] Session {} data payload={} bytes",
+                    session_key,
+                    payload.len()
+                );
 
                 if payload.len() > MAX_PAYLOAD_BYTES {
-                    info!("[DATA] Session {} OVERSIZED payload {} > {}, dropping",
-                        session_key, payload.len(), MAX_PAYLOAD_BYTES);
+                    info!(
+                        "[DATA] Session {} OVERSIZED payload {} > {}, dropping",
+                        session_key,
+                        payload.len(),
+                        MAX_PAYLOAD_BYTES
+                    );
                     return Ok(());
                 }
 
                 let stored = self.store.push(payload.clone());
-                info!("[DATA] Session {} stored id={}, broadcasting", session_key, stored.id);
+                info!(
+                    "[DATA] Session {} stored id={}, broadcasting",
+                    session_key, stored.id
+                );
                 let relayed = RelayedMessage {
                     id: stored.id,
                     timestamp: stored.timestamp,
@@ -627,14 +716,20 @@ impl RelayServer {
                 };
                 let subs = self.data_tx.send(relayed);
                 match subs {
-                    Ok(n) => info!("[DATA] Session {} broadcast OK to {} receivers", session_key, n),
+                    Ok(n) => info!(
+                        "[DATA] Session {} broadcast OK to {} receivers",
+                        session_key, n
+                    ),
                     Err(_) => info!("[DATA] Session {} broadcast: no receivers", session_key),
                 }
                 Ok(())
             }
             Opcode::Heartbeat => {
                 let client_ts = reader.read_u64().map_err(|e| anyhow::anyhow!("{}", e))?;
-                info!("[HEARTBEAT] Session {} client_ts={}", session_key, client_ts);
+                info!(
+                    "[HEARTBEAT] Session {} client_ts={}",
+                    session_key, client_ts
+                );
                 let response = ServerPacketEncoder::heartbeat(client_ts);
                 direct_tx
                     .send(response)
@@ -644,21 +739,30 @@ impl RelayServer {
             }
             Opcode::KeyExchange => {
                 if !*authenticated {
-                    info!("[KEYEX] Session {} REJECTED: not authenticated", session_key);
+                    info!(
+                        "[KEYEX] Session {} REJECTED: not authenticated",
+                        session_key
+                    );
                     return Err(anyhow::anyhow!("not authenticated"));
                 }
                 let public_key = reader
                     .read_len_prefixed()
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
-                info!("[KEYEX] Session {} public_key={} bytes", session_key, public_key.len());
+                info!(
+                    "[KEYEX] Session {} public_key={} bytes",
+                    session_key,
+                    public_key.len()
+                );
 
                 let _ = self.keyexchange_tx.send((session_key, public_key));
                 info!("[KEYEX] Session {} relayed to all peers", session_key);
                 Ok(())
             }
             Opcode::AuthResult | Opcode::SyncResponse | Opcode::NewCertHash => {
-                info!("[IGNORE] Session {} received server->client opcode {:?}, ignoring",
-                    session_key, opcode);
+                info!(
+                    "[IGNORE] Session {} received server->client opcode {:?}, ignoring",
+                    session_key, opcode
+                );
                 Ok(())
             }
         }
@@ -672,7 +776,7 @@ impl RelayServer {
 
                 // Rotate certificate if needed and refresh TUI.
                 let rotated = {
-                    let mut cm = self.cert_manager.lock().unwrap();
+                    let mut cm = self.cert_manager.lock().unwrap_or_else(|e| e.into_inner());
                     let r = cm.maybe_rotate();
                     cm.prune_previous();
                     r
@@ -684,7 +788,7 @@ impl RelayServer {
                     // clients still pinned to the old fingerprint is handled at
                     // the application layer via the `NewCertHash` (0x07) broadcast.
                     {
-                        let cm = self.cert_manager.lock().unwrap();
+                        let cm = self.cert_manager.lock().unwrap_or_else(|e| e.into_inner());
                         let provider = Arc::new(crate::cert::default_crypto_provider());
                         match cm.current().certified_key(&provider) {
                             Ok(key) => self.cert_resolver.update(key),
@@ -694,11 +798,11 @@ impl RelayServer {
                         }
                     }
 
-                    let cert = self.cert_manager.lock().unwrap().current().clone();
+                    let cert = self.cert_manager.lock().unwrap_or_else(|e| e.into_inner()).current().clone();
                     // During the overlap window the previous cert is still valid;
                     // surface that in the TUI.
                     let mut view = crate::tui::CertView::from_cert(&cert);
-                    view.rotating = self.cert_manager.lock().unwrap().previous().is_some();
+                    view.rotating = self.cert_manager.lock().unwrap_or_else(|e| e.into_inner()).previous().is_some();
                     self.tui.set_cert(view);
                     info!(
                         "Certificate rotated; new fingerprint {}",
@@ -714,9 +818,9 @@ impl RelayServer {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    let _ = self.control_tx.send(
-                        ServerPacketEncoder::new_cert_hash(&hash_bytes, expires_at)
-                    );
+                    let _ = self
+                        .control_tx
+                        .send(ServerPacketEncoder::new_cert_hash(&hash_bytes, expires_at));
                     info!("Applied rotated certificate to live TLS resolver");
                 }
 
@@ -775,9 +879,10 @@ fn try_read_packet(buf: &[u8]) -> Result<Option<usize>, ()> {
         }
         _ => return Err(()),
     };
-    // Bound the declared payload length so a malicious `len` cannot make us
+    // Bound the declared payload length to match the maximum accepted payload
+    // (MAX_PAYLOAD_BYTES = 1_000_000) so a malicious `len` cannot make us
     // reserve an absurd buffer or report a huge "incomplete" packet (C1).
-    const MAX_PACKET_LEN: usize = 16 * 1024 * 1024;
+    const MAX_PACKET_LEN: usize = 1 + 4 + MAX_PAYLOAD_BYTES; // opcode + len + payload
     if len > MAX_PACKET_LEN {
         return Err(());
     }

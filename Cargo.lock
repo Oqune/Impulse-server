@@ -1182,6 +1182,7 @@ dependencies = [
  "tracing-subscriber",
  "tui-qrcode",
  "wtransport",
+ "x509-parser 0.17.0",
 ]
 
 [[package]]
@@ -2171,7 +2172,7 @@ dependencies = [
  "ring",
  "rustls-pki-types",
  "time",
- "x509-parser",
+ "x509-parser 0.18.1",
  "yasna",
 ]
 
@@ -3505,7 +3506,7 @@ dependencies = [
  "tracing",
  "url",
  "wtransport-proto",
- "x509-parser",
+ "x509-parser 0.18.1",
 ]
 
 [[package]]
@@ -3546,6 +3547,23 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
+
+[[package]]
+name = "x509-parser"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4569f339c0c402346d4a75a9e39cf8dad310e287eef1ff56d4c68e5067f53460"
+dependencies = [
+ "asn1-rs",
+ "data-encoding",
+ "der-parser",
+ "lazy_static",
+ "nom",
+ "oid-registry",
+ "rusticata-macros",
+ "thiserror 2.0.18",
+ "time",
+]
 
 [[package]]
 name = "x509-parser"

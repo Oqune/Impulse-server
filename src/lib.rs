@@ -1,7 +1,7 @@
 //! Impulse server — a secure, ephemeral messenger relay over WebTransport (QUIC).
 //!
 //! Architecture overview:
-//! * `cert` — self-signed Ed25519 certificate generation, 14-day TTL,
+//! * `cert` — self-signed ECDSA P-256 certificate generation, 14-day TTL,
 //!   2-day overlap rotation, SHA-256 TOFU fingerprint.
 //! * `storage` — ephemeral in-RAM message log with 72h TTL and sequence ids.
 //! * `protocol` — binary wire frames (opcodes 0x01–0x08) over WebTransport.
@@ -41,7 +41,7 @@ pub async fn run(app_config: AppConfig, shutdown: Arc<Notify>) -> Result<()> {
         app_config.server.san.clone(),
     )?));
 
-    let initial_cert = cert_manager.lock().unwrap().current().clone();
+    let initial_cert = cert_manager.lock().unwrap_or_else(|e| e.into_inner()).current().clone();
     let cert_view = CertView::from_cert(&initial_cert);
     let tofu_payload = cert_view.tofu_qr_string();
 

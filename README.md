@@ -30,10 +30,10 @@ Key design points:
   (little-endian), not JSON.
 - **Auth:** clients must send `Auth` with the password; the server verifies a
   SHA-256 hash in constant time.
-- **TLS / Certificates:** self-signed **Ed25519** certificates, valid **14 days**,
+- **TLS / Certificates:** self-signed **ECDSA P-256** certificates, valid **14 days**,
   rotated automatically with a **2-day overlap** window. The PEM material is
   persisted under `cert_dir` (resolved relative to the executable, `0600` on
-  Unix).
+  Unix, restricted DACL on Windows).
 - **TOFU:** the server renders a QR code (right TUI panel) containing the
   SHA-256 fingerprint of the DER certificate plus its issue timestamp. Clients
   scan it, pin `serverCertificateHashes`, and trust the server on first use. On
@@ -74,7 +74,106 @@ cargo build --release
 | `--config` | | Path to a TOML config file | `./config.toml` |
 
 `password_hash` is **required** — there is no insecure default. Generate it with
-`printf 'pw' | sha256sum`.
+`printf 'pw' | sha256sum` or use the built-in helper:
+
+```bash
+./target/release/Impulse-server --hash-password yourpassword
+```
+
+## Production deployment
+
+### Requirements
+
+- **Rust 1.85+** (edition 2024) to build from source.
+- A **UDP-reachable** port (QUIC runs over UDP). Open/forward the configured
+  port in firewalls / security groups.
+- On **Unix**, the private key file is written with `0600` permissions
+  automatically; on Windows the ACL is restricted to the current user via `icacls`.
+- **Root/administrator is NOT required** — bind to a high port (e.g. `4433`)
+  instead of `443`. The QR/TOFU flow lets clients trust a self-signed cert,
+  so no public CA is needed.
+
+### Recommended runtime flags
+
+For production, run with `RUST_LOG=info` or `RUST_LOG=warn` to avoid excessive
+I/O from debug-level hex dumps (raw chunk data is logged at DEBUG level):
+
+```bash
+RUST_LOG=info ./target/release/Impulse-server --config config.toml
+```
+
+The server writes rolling logs under `logs/` (daily rotation, 7-day retention).
+
+### Systemd service (Linux)
+
+Create `/etc/systemd/system/impulse-server.service`:
+
+```ini
+[Unit]
+Description=Impulse Server
+After=network.target
+
+[Service]
+Type=simple
+User=impulse
+WorkingDirectory=/opt/impulse-server
+ExecStart=/opt/impulse-server/Impulse-server --config /opt/impulse-server/config.toml
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now impulse-server
+```
+
+### Docker
+
+```dockerfile
+FROM rust:1.85-slim AS builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/target/release/Impulse-server /usr/local/bin/impulse-server
+COPY config.toml /etc/impulse-server/config.toml
+VOLUME /var/lib/impulse-server/cert_data /var/log/impulse-server
+EXPOSE 4433/udp
+ENV RUST_LOG=info
+ENTRYPOINT ["impulse-server", "--config", "/etc/impulse-server/config.toml"]
+```
+
+```bash
+docker build -t impulse-server .
+docker run -d \
+  --name impulse \
+  --restart unless-stopped \
+  -v cert_data:/var/lib/impulse-server/cert_data \
+  -v impulse_logs:/var/log/impulse-server \
+  -p 4433:4433/udp \
+  impulse-server
+```
+
+### Firewall
+
+QUIC uses UDP. Ensure the chosen port is allowed:
+
+```bash
+# ufw (Ubuntu/Debian)
+sudo ufw allow 4433/udp
+
+# firewalld (RHEL/CentOS/Fedora)
+sudo firewall-cmd --add-port=4433/udp --permanent && sudo firewall-cmd --reload
+
+# Windows PowerShell
+New-NetFirewallRule -DisplayName "Impulse QUIC" -Direction Inbound -Protocol UDP -LocalPort 4433 -Action Allow
+```
 
 ## Platforms
 
@@ -101,7 +200,7 @@ GitHub Release.
 - A **UDP-reachable** port (QUIC runs over UDP). Open/forward the configured
   port in firewalls.
 - On **Unix**, the private key file is written with `0600` permissions
-  automatically; on Windows the ACL is left to the OS.
+  automatically; on Windows the DACL is restricted to the current user.
 - **Root/administrator is NOT required** — bind to a high port (e.g. `4433`)
   instead of `443`. The QR/TOFU flow lets clients trust a self-signed cert,
   so no public CA is needed.
@@ -124,36 +223,40 @@ followed by `len` bytes.
 
 Unknown/invalid opcodes from a client close the connection. Idle streams are
 closed after 300s. Sessions are capped at 1024; oversized payloads (>1 MB) are
-dropped.
+dropped. The wire parser validates declared packet length against the same 1 MB
+payload limit before any allocation, preventing CPU-DoS via inflated length
+prefixes (C1).
 
 ## Security
 
 - Mandatory QUIC/TLS 1.3 transport (WebTransport).
-- Short-lived Ed25519 certificates (14d) with automatic rotation (2d overlap);
+- Short-lived ECDSA P-256 certificates (14d) with automatic rotation (2d overlap);
   the new cert is applied to the **live** TLS resolver (no restart) and
   announced via `NewCertHash`.
 - TOFU fingerprint pinning via QR code + `NewCertHash` control packet.
+- Post-quantum hybrid TLS key exchange (X25519Kyber768) via `aws-lc-rs`.
 - Ephemeral RAM-only storage, 72h TTL, bounded ring buffer and payload size.
 - Constant-time password-hash comparison.
-- Private key file restricted to `0600` on Unix.
+- Private key file restricted to `0600` on Unix; exclusive DACL on Windows.
+- Per-IP rate limiting and session caps to mitigate DoS.
 - No plaintext, passwords, or payloads are logged.
 
 ## Graceful shutdown
 
 `Ctrl+C` / `SIGTERM` (or `q` in the TUI) triggers a graceful shutdown: the
 endpoint stops accepting new sessions and active writers are drained. Logs are
-also written to `logs/impulse-server.log`.
+written to `logs/` with daily rotation and 7-day retention.
 
 ## Project layout
 
 ```
 src/
-  cert.rs      — Ed25519 cert generation, rotation, SHA-256 TOFU fingerprint, FS persist
+  cert.rs      — ECDSA P-256 cert generation, rotation, SHA-256 TOFU fingerprint, FS persist
   storage.rs   — ephemeral in-RAM message log (TTL 72h, sequence ids)
   protocol.rs  — binary wire frames (opcodes 0x01–0x08)
   server.rs    — WebTransport endpoint, session handling, broadcast relay
   tui.rs       — terminal UI: Server Info header, log stream, TOFU QR / fingerprint panel
-  logging.rs   — tracing → TUI / file bridge
+  logging.rs   — tracing → TUI / rolling file bridge
   config.rs    — CLI + config.toml loading
   lib.rs       — wiring + run() entry point
   main.rs      — binary entry point

@@ -17,5 +17,5 @@ san = []
 # client-side and sends the hex string; the server compares it directly.
 # Generate with:
 #   printf 'yourpassword' | sha256sum
-# or using the `impulse-server --hash-password <pw>` command (when implemented).
+# or using the `impulse-server --hash-password <pw>` command.
 password_hash = "ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f"
