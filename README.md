@@ -178,19 +178,17 @@ New-NetFirewallRule -DisplayName "Impulse QUIC" -Direction Inbound -Protocol UDP
 
 Impulse-server is written in portable Rust (edition 2024) and builds on the
 targets below with a working Rust toolchain and UDP/QUIC networking. CI produces
-release binaries for Linux/macOS/Windows on both x86-64 and ARM64.
+release binaries for Linux/Windows on both x86-64 and ARM64.
 
 | Platform | Target triple | Status | Notes |
 |----------|---------------|--------|-------|
-| Linux (x86-64) | `x86_64-unknown-linux-gnu` | ✅ Tested | Recommended for servers |
-| Linux (ARM64) | `aarch64-unknown-linux-gnu` | ✅ Tested (CI) | e.g. AWS Graviton, Raspberry Pi 4 (64-bit OS) |
-| macOS (Apple Silicon) | `aarch64-apple-darwin` | ✅ Tested (CI) | |
-| macOS (Intel) | `x86_64-apple-darwin` | ✅ Tested (CI) | |
-| Windows (x86-64) | `x86_64-pc-windows-msvc` | ✅ Tested | Console app; binds the UDP/QUIC port directly |
-| Windows (ARM64) | `aarch64-pc-windows-gnu` | ✅ Tested (CI) | |
+| Linux (x86-64) | `x86_64-unknown-linux-gnu` | ✅ CI tested | Recommended for servers |
+| Linux (ARM64) | `aarch64-unknown-linux-gnu` | ✅ CI tested (cross) | e.g. AWS Graviton, Raspberry Pi 4 (64-bit OS) |
+| Windows (x86-64) | `x86_64-pc-windows-msvc` | ✅ CI tested | Console app; binds the UDP/QUIC port directly |
+| Windows (ARM64) | `aarch64-pc-windows-gnu` | ⚠️ Release build only | No CI test runner; cross-built via zigbuild |
 | FreeBSD / BSDs | `x86_64-unknown-freebsd` | ⚠️ Manual only | The `aws-lc-sys` crypto backend has no FreeBSD sysroot under cross-tools; a native FreeBSD toolchain is required |
 
-Prebuilt binaries for every ✅ row (except FreeBSD) are attached to each
+Prebuilt binaries for every ✅ and ⚠️ row (except FreeBSD) are attached to each
 GitHub Release.
 
 ### Requirements

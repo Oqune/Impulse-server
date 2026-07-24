@@ -175,19 +175,17 @@ New-NetFirewallRule -DisplayName "Impulse QUIC" -Direction Inbound -Protocol UDP
 
 Impulse-server написан на переносимом Rust (edition 2024) и собирается на целях
 ниже при наличии рабочей Rust-тулчейна и UDP/QUIC сети. CI публикует релизные
-бинарники для Linux/macOS/Windows на x86-64 и ARM64.
+бинарники для Linux/Windows на x86-64 и ARM64.
 
 | Платформа | Target triple | Статус | Примечания |
 |-----------|---------------|--------|------------|
-| Linux (x86-64) | `x86_64-unknown-linux-gnu` | ✅ Tested | Рекомендуется для серверов |
-| Linux (ARM64) | `aarch64-unknown-linux-gnu` | ✅ Tested (CI) | AWS Graviton, Raspberry Pi 4 (64-bit OS) |
-| macOS (Apple Silicon) | `aarch64-apple-darwin` | ✅ Tested (CI) | |
-| macOS (Intel) | `x86_64-apple-darwin` | ✅ Tested (CI) | |
-| Windows (x86-64) | `x86_64-pc-windows-msvc` | ✅ Tested | Консольное приложение; биндится на UDP/QUIC порт напрямую |
-| Windows (ARM64) | `aarch64-pc-windows-gnu` | ✅ Tested (CI) | |
-| FreeBSD / BSD | `x86_64-unknown-freebsd` | ⚠️ Manual only | У `aws-lc-sys` нет FreeBSD sysroot для кросc-компиляции; требуется нативная тулчейн |
+| Linux (x86-64) | `x86_64-unknown-linux-gnu` | ✅ CI tested | Рекомендуется для серверов |
+| Linux (ARM64) | `aarch64-unknown-linux-gnu` | ✅ CI tested (cross) | AWS Graviton, Raspberry Pi 4 (64-bit OS) |
+| Windows (x86-64) | `x86_64-pc-windows-msvc` | ✅ CI tested | Консольное приложение; биндится на UDP/QUIC порт напрямую |
+| Windows (ARM64) | `aarch64-pc-windows-gnu` | ⚠️ Release build only | Нет CI тестового раннера; кросс-компиляция через zigbuild |
+| FreeBSD / BSD | `x86_64-unknown-freebsd` | ⚠️ Manual only | У `aws-lc-sys` нет FreeBSD sysroot для кросс-компиляции; требуется нативная тулчейн |
 
-Готовые бинарники для всех ✅ строк (кроме FreeBSD) прикреплены к каждому GitHub Release.
+Готовые бинарники для всех ✅ и ⚠️ строк (кроме FreeBSD) прикреплены к каждому GitHub Release.
 
 ### Требования
 
