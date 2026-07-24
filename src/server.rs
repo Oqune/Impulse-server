@@ -21,7 +21,7 @@ use wtransport::{Endpoint, ServerConfig};
 
 use crate::cert::CertManager;
 use crate::cert::DynamicCertResolver;
-use crate::protocol::{Opcode, PacketReader, RelayedMessage, ServerPacketEncoder};
+use crate::protocol::{encode_key_exchange, Opcode, PacketReader, RelayedMessage, ServerPacketEncoder};
 use crate::storage::MessageStore;
 use crate::tui::TuiHandle;
 
@@ -756,7 +756,7 @@ impl RelayServer {
                     public_key.len()
                 );
 
-                let _ = self.keyexchange_tx.send((session_key, public_key));
+                let _ = self.keyexchange_tx.send((session_key, encode_key_exchange(&public_key)));
                 info!("[KEYEX] Session {} relayed to all peers", session_key);
                 Ok(())
             }

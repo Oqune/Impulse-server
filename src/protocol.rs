@@ -14,7 +14,7 @@
 //! * `0x05` Data          — client → server: len (u32) + payload;
 //!   server → client: id (u64) + timestamp (u64) + len + payload.
 //! * `0x06` Heartbeat     — either direction: client timestamp (u64).
-//! * `0x07` NewCertHash   — server → client: len (u32) + SHA-256 + expiry (u64).
+//! * `0x07` NewCertHash   — server → client: 32 raw SHA-256 bytes + expiry (u64).
 //! * `0x08` KeyExchange   — either direction: len (u32) + public key.
 
 use std::io::{self};
@@ -251,7 +251,7 @@ pub fn encode_heartbeat(client_timestamp: u64) -> Vec<u8> {
 
 /// Build a `NewCertHash` packet (SHA-256 fingerprint + expiry timestamp).
 ///
-/// Wire format (per spec): `0x07` opcode, exactly 32 raw SHA-256 bytes, then
+/// Wire format: `0x07` opcode, exactly 32 raw SHA-256 bytes, then
 /// the `u64` unix-expiry — no length prefix.
 pub fn encode_new_cert_hash(hash: &[u8; 32], expires_at: u64) -> Vec<u8> {
     let mut w = PacketWriter::with_opcode(Opcode::NewCertHash);
