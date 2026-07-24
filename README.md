@@ -185,7 +185,6 @@ release binaries for Linux/Windows on both x86-64 and ARM64.
 | Linux (x86-64) | `x86_64-unknown-linux-gnu` | ✅ CI tested | Recommended for servers |
 | Linux (ARM64) | `aarch64-unknown-linux-gnu` | ✅ CI tested (cross) | e.g. AWS Graviton, Raspberry Pi 4 (64-bit OS) |
 | Windows (x86-64) | `x86_64-pc-windows-msvc` | ✅ CI tested | Console app; binds the UDP/QUIC port directly |
-| Windows (ARM64) | `aarch64-pc-windows-gnu` | ⚠️ Release build only | No CI test runner; cross-built via zigbuild |
 | FreeBSD / BSDs | `x86_64-unknown-freebsd` | ⚠️ Manual only | The `aws-lc-sys` crypto backend has no FreeBSD sysroot under cross-tools; a native FreeBSD toolchain is required |
 
 Prebuilt binaries for every ✅ and ⚠️ row (except FreeBSD) are attached to each

@@ -182,7 +182,6 @@ Impulse-server написан на переносимом Rust (edition 2024) и
 | Linux (x86-64) | `x86_64-unknown-linux-gnu` | ✅ CI tested | Рекомендуется для серверов |
 | Linux (ARM64) | `aarch64-unknown-linux-gnu` | ✅ CI tested (cross) | AWS Graviton, Raspberry Pi 4 (64-bit OS) |
 | Windows (x86-64) | `x86_64-pc-windows-msvc` | ✅ CI tested | Консольное приложение; биндится на UDP/QUIC порт напрямую |
-| Windows (ARM64) | `aarch64-pc-windows-gnu` | ⚠️ Release build only | Нет CI тестового раннера; кросс-компиляция через zigbuild |
 | FreeBSD / BSD | `x86_64-unknown-freebsd` | ⚠️ Manual only | У `aws-lc-sys` нет FreeBSD sysroot для кросс-компиляции; требуется нативная тулчейн |
 
 Готовые бинарники для всех ✅ и ⚠️ строк (кроме FreeBSD) прикреплены к каждому GitHub Release.
