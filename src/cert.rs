@@ -287,19 +287,19 @@ impl CertManager {
             use std::os::unix::fs::PermissionsExt;
             let perm = std::fs::Permissions::from_mode(0o600);
             std::fs::set_permissions(path, perm)?;
-            return Ok(());
         }
 
         #[cfg(windows)]
         {
-            restrict_key_permissions_windows(path)
+            restrict_key_permissions_windows(path)?;
         }
 
         #[cfg(not(any(unix, windows)))]
         {
             let _ = path;
-            Ok(())
         }
+
+        Ok(())
     }
 
     /// Return the resolved (absolute) directory where the certificate/key
