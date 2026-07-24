@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use copypasta::{ClipboardContext, ClipboardProvider};
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{self};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -234,6 +234,7 @@ pub fn run_tui(
 
         if event::poll(Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
+            && key.kind != KeyEventKind::Release
         {
             // Ctrl+C / q — quit
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
