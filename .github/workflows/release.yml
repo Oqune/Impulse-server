@@ -7,7 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  BIN: impulse-server
+  BIN: Impulse-server
 
 jobs:
   # Native builds on each runner (fast, no emulation).

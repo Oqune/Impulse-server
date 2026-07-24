@@ -121,12 +121,11 @@ impl RelayServer {
         tui: TuiHandle,
     ) -> anyhow::Result<Self> {
         let cert_manager = cert_manager.clone();
-        let (tls_config, cert_resolver) =
-            cert_manager
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .build_dynamic_tls_config()
-                .map_err(|e| anyhow::anyhow!("failed to build TLS config: {}", e))?;
+        let (tls_config, cert_resolver) = cert_manager
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .build_dynamic_tls_config()
+            .map_err(|e| anyhow::anyhow!("failed to build TLS config: {}", e))?;
         let session_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_SESSIONS));
 
         let server_config = ServerConfig::builder()
@@ -279,7 +278,10 @@ impl RelayServer {
     /// connection is allowed, `false` if it should be rejected.
     fn check_rate_limit(&self, remote_ip: IpAddr) -> bool {
         let now = Instant::now();
-        let mut ip_map = self.ip_connections.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ip_map = self
+            .ip_connections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let times = ip_map.entry(remote_ip).or_default();
         times.retain(|t| now.duration_since(*t) < RATE_LIMIT_WINDOW);
         if times.len() >= MAX_CONNECTIONS_PER_IP {
@@ -798,11 +800,21 @@ impl RelayServer {
                         }
                     }
 
-                    let cert = self.cert_manager.lock().unwrap_or_else(|e| e.into_inner()).current().clone();
+                    let cert = self
+                        .cert_manager
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .current()
+                        .clone();
                     // During the overlap window the previous cert is still valid;
                     // surface that in the TUI.
                     let mut view = crate::tui::CertView::from_cert(&cert);
-                    view.rotating = self.cert_manager.lock().unwrap_or_else(|e| e.into_inner()).previous().is_some();
+                    view.rotating = self
+                        .cert_manager
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .previous()
+                        .is_some();
                     self.tui.set_cert(view);
                     info!(
                         "Certificate rotated; new fingerprint {}",

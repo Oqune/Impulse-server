@@ -72,7 +72,7 @@ impl MessageStore {
         self.inner.insert(id, msg.clone());
         {
             let mut order = self.order.lock().unwrap_or_else(|e| e.into_inner());
-            // Enforce the hard cap by dropping oldest entries.
+            order.push(id);
             while order.len() > MAX_MESSAGES {
                 if let Some(oldest) = order.first().copied() {
                     order.remove(0);

@@ -432,7 +432,13 @@ impl DynamicCertResolver {
 
 impl ResolvesServerCert for DynamicCertResolver {
     fn resolve(&self, _client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        Some(self.inner.read().unwrap_or_else(|e| e.into_inner()).primary.clone())
+        Some(
+            self.inner
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .primary
+                .clone(),
+        )
     }
 }
 
@@ -449,7 +455,10 @@ fn parse_validity(der: &CertificateDer<'static>) -> Option<(SystemTime, SystemTi
         let secs = t.timestamp().max(0) as u64;
         UNIX_EPOCH + Duration::from_secs(secs)
     };
-    Some((to_system(validity.not_before), to_system(validity.not_after)))
+    Some((
+        to_system(validity.not_before),
+        to_system(validity.not_after),
+    ))
 }
 
 /// Replace the DACL of `path` with one that grants only the current user full

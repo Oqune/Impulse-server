@@ -7,7 +7,7 @@
 [![Rust](https://img.shields.io/badge/Rust-1.85%2B-darkblue?logo=rust)](https://www.rust-lang.org)
 [![WebTransport](https://img.shields.io/badge/Transport-WebTransport%20%2F%20QUIC-green)](https://w3c.github.io/webtransport/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/oqune/impulse-server/actions/workflows/ci.yml/badge.svg)](https://github.com/oqune/impulse-server/actions/workflows/ci.yml)
+[![CI](https://github.com/Oqune/Impulse-server/actions/workflows/ci.yml/badge.svg)](https://github.com/Oqune/Impulse-server/actions/workflows/ci.yml)
 
 Secure, **ephemeral** messenger server over **WebTransport (QUIC)** with
 **TOFU** trust-on-first-use and password authentication.
@@ -34,24 +34,23 @@ Key design points:
   rotated automatically with a **2-day overlap** window. The PEM material is
   persisted under `cert_dir` (resolved relative to the executable, `0600` on
   Unix, restricted DACL on Windows).
-- **TOFU:** the server renders a QR code (right TUI panel) containing the
-  SHA-256 fingerprint of the DER certificate plus its issue timestamp. Clients
-  scan it, pin `serverCertificateHashes`, and trust the server on first use. On
-  rotation the new fingerprint is broadcast via `NewCertHash` (0x07).
+- **TOFU:** the server renders a QR code containing `impulse-cert:<sha256>`
+  (the SHA-256 fingerprint of the DER certificate). Clients scan it, pin
+  `serverCertificateHashes`, and trust the server on first use. On rotation
+  the new fingerprint is broadcast via `NewCertHash` (0x07).
 - **Storage:** in-RAM ring buffer, messages expire after 72h (`TTL`), bounded by
   count (`10_000`) and per-payload size (`1 MB`).
 - **Relay:** broadcast to all active sessions; late joiners catch up via
-  `Sync { last_seen_id }`.
-- **Admin:** a **TUI** with three regions:
-  - **Server Info header** (top-left): bind address, transport
+  `Sync { last_seen_id }`. A single `Sync` returns at most `500` messages.
+- **Admin:** a **TUI** with a two-column layout:
+  - **Left column** (Info + QR + Certificate): server bind address, transport
     (`WebTransport/QUIC TLS1.3 (h3)`), crate version, SAN count, live
     `sessions / MAX_SESSIONS`, stored message count, message TTL, max payload
-    size, certificate SHA-256 fingerprint (short), cert expiry countdown, and a
-    ⚠ rotating indicator during key overlap.
-  - **Logs** (bottom-left): live server log stream.
-  - **TOFU panel** (right, when the terminal is wide enough): a scannable QR
-    code containing the full grouped certificate fingerprint plus its issue time
-    and remaining validity.
+    size, certificate SHA-256 fingerprint (short), cert expiry countdown, a
+    ⚠ rotating indicator during key overlap, and a scannable QR code.
+  - **Right column** (Help bar + Logs): live server log stream with level
+    filtering (`1`–`5` keys), scroll (`↑↓`/`PgUp`/`PgDn`/`Home`/`End`),
+    and `Shift+C` to copy all logs to clipboard.
   `Ctrl+C` / `q` quits and shuts down gracefully.
 
 ## Build & run
@@ -223,9 +222,9 @@ followed by `len` bytes.
 
 Unknown/invalid opcodes from a client close the connection. Idle streams are
 closed after 300s. Sessions are capped at 1024; oversized payloads (>1 MB) are
-dropped. The wire parser validates declared packet length against the same 1 MB
-payload limit before any allocation, preventing CPU-DoS via inflated length
-prefixes (C1).
+dropped. A single `Sync` returns at most 500 messages. The wire parser validates
+declared packet length against the same 1 MB payload limit before any
+allocation, preventing CPU-DoS via inflated length prefixes (C1).
 
 ## Security
 
@@ -238,7 +237,8 @@ prefixes (C1).
 - Ephemeral RAM-only storage, 72h TTL, bounded ring buffer and payload size.
 - Constant-time password-hash comparison.
 - Private key file restricted to `0600` on Unix; exclusive DACL on Windows.
-- Per-IP rate limiting and session caps to mitigate DoS.
+- Per-IP rate limiting (10 connections / 10s window) and session caps to mitigate DoS.
+- Idle sessions are closed after 300s to avoid leaking resources.
 - No plaintext, passwords, or payloads are logged.
 
 ## Graceful shutdown

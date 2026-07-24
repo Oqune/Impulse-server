@@ -41,7 +41,11 @@ pub async fn run(app_config: AppConfig, shutdown: Arc<Notify>) -> Result<()> {
         app_config.server.san.clone(),
     )?));
 
-    let initial_cert = cert_manager.lock().unwrap_or_else(|e| e.into_inner()).current().clone();
+    let initial_cert = cert_manager
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .current()
+        .clone();
     let cert_view = CertView::from_cert(&initial_cert);
     let tofu_payload = cert_view.tofu_qr_string();
 

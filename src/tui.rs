@@ -270,15 +270,13 @@ pub fn run_tui(
     }
 
     terminal::disable_raw_mode()?;
-    crossterm::execute!(
-        terminal.backend_mut(),
-        terminal::LeaveAlternateScreen,
-    )?;
+    crossterm::execute!(terminal.backend_mut(), terminal::LeaveAlternateScreen,)?;
     terminal.show_cursor()?;
 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     filtered: &[&LogRecord],
@@ -365,15 +363,12 @@ fn draw_help_bar(
     let filter_defs: &[(Level, &str, Color)] = &[
         (Level::TRACE, "1:TRC", Color::DarkGray),
         (Level::DEBUG, "2:DBG", Color::Magenta),
-        (Level::INFO,  "3:INF", Color::Cyan),
-        (Level::WARN,  "4:WRN", Color::Yellow),
+        (Level::INFO, "3:INF", Color::Cyan),
+        (Level::WARN, "4:WRN", Color::Yellow),
         (Level::ERROR, "5:ERR", Color::Red),
     ];
 
-    spans.push(Span::styled(
-        " Filters: ",
-        Style::default().fg(Color::Gray),
-    ));
+    spans.push(Span::styled(" Filters: ", Style::default().fg(Color::Gray)));
 
     for (level, label, color) in filter_defs {
         let active = all_active || state.active_filters.contains(level);
@@ -435,13 +430,13 @@ fn draw_help_bar(
     ));
 
     // Copy confirmation flash
-    if let Some(t) = last_copy {
-        if t.elapsed().unwrap_or_default() < Duration::from_secs(2) {
-            spans.push(Span::styled(
-                "  ✓ copied",
-                Style::default().fg(Color::Green),
-            ));
-        }
+    if let Some(t) = last_copy
+        && t.elapsed().unwrap_or_default() < Duration::from_secs(2)
+    {
+        spans.push(Span::styled(
+            "  ✓ copied",
+            Style::default().fg(Color::Green),
+        ));
     }
 
     let bar = Paragraph::new(Line::from(spans));
@@ -587,7 +582,11 @@ fn draw_logs(f: &mut ratatui::Frame, area: Rect, filtered: &[&LogRecord], state:
             0
         }
     } else {
-        let max_scroll = if total > usable { (total - usable) as u16 } else { 0 };
+        let max_scroll = if total > usable {
+            (total - usable) as u16
+        } else {
+            0
+        };
         state.scroll_offset.min(max_scroll)
     };
 
@@ -649,15 +648,15 @@ fn draw_qr(f: &mut ratatui::Frame, area: Rect, cert: &CertView) {
     match qrcode::QrCode::with_error_correction_level(&qr_string, qrcode::EcLevel::L) {
         Ok(qr) => {
             let cols = qr.width() as u16;
-            let rows = ((qr.width() + 1) / 2) as u16;
+            let rows = qr.width().div_ceil(2) as u16;
 
             let widget_w = cols.min(inner.width);
             let widget_h = rows.min(inner.height);
 
             let centered = centered_rect(widget_w, widget_h, inner);
 
-            let widget = tui_qrcode::QrCodeWidget::new(qr)
-                .quiet_zone(tui_qrcode::QuietZone::Disabled);
+            let widget =
+                tui_qrcode::QrCodeWidget::new(qr).quiet_zone(tui_qrcode::QuietZone::Disabled);
             f.render_widget(widget, centered);
         }
         Err(_) => {
@@ -680,9 +679,10 @@ fn draw_cert_info(f: &mut ratatui::Frame, area: Rect, cert: &CertView) {
     );
 
     let mut lines = vec![
-        Line::from(vec![
-            Span::styled("Fingerprint:", Style::default().fg(Color::Gray)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Fingerprint:",
+            Style::default().fg(Color::Gray),
+        )]),
         Line::from(Span::styled(
             cert.fingerprint_grouped.clone(),
             Style::default()
