@@ -31,6 +31,8 @@ pub enum Opcode {
     Heartbeat = 0x06,
     NewCertHash = 0x07,
     KeyExchange = 0x08,
+    KeyExchangeKem = 0x09,
+    KeyExchangeDsa = 0x0A,
 }
 
 impl Opcode {
@@ -45,6 +47,8 @@ impl Opcode {
             0x06 => Some(Opcode::Heartbeat),
             0x07 => Some(Opcode::NewCertHash),
             0x08 => Some(Opcode::KeyExchange),
+            0x09 => Some(Opcode::KeyExchangeKem),
+            0x0A => Some(Opcode::KeyExchangeDsa),
             _ => None,
         }
     }

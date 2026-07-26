@@ -37,6 +37,8 @@ fn opcode_name(b: u8) -> &'static str {
         0x06 => "Heartbeat",
         0x07 => "NewCertHash",
         0x08 => "KeyExchange",
+        0x09 => "KeyExchangeKem",
+        0x0A => "KeyExchangeDsa",
         _ => "UNKNOWN",
     }
 }
@@ -371,47 +373,75 @@ impl RelayServer {
                 info!("[WRITER] Session {} writer task started", session_key);
                 loop {
                     tokio::select! {
-                        Ok(msg) = data_sub.recv() => {
-                            let packet = msg.to_packet();
-                            let op = if packet.is_empty() { 0 } else { packet[0] };
-                            info!("[WRITER] Session {} <- DATA relay opcode=0x{:02x} ({}) len={}",
-                                session_key, op, opcode_name(op), packet.len());
-                            if let Err(e) = writer.write_all(&packet).await {
-                                info!("[WRITER] Session {} write error: {}", session_key, e);
-                                break;
-                            }
-                            if let Err(e) = writer.flush().await {
-                                info!("[WRITER] Session {} flush error: {}", session_key, e);
-                                break;
+                        result = data_sub.recv() => {
+                            match result {
+                                Ok(msg) => {
+                                    let packet = msg.to_packet();
+                                    let op = if packet.is_empty() { 0 } else { packet[0] };
+                                    info!("[WRITER] Session {} <- DATA relay opcode=0x{:02x} ({}) len={}",
+                                        session_key, op, opcode_name(op), packet.len());
+                                    if let Err(e) = writer.write_all(&packet).await {
+                                        info!("[WRITER] Session {} write error: {}", session_key, e);
+                                        break;
+                                    }
+                                    if let Err(e) = writer.flush().await {
+                                        info!("[WRITER] Session {} flush error: {}", session_key, e);
+                                        break;
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                    warn!("[WRITER] Session {} lagged, missed {} messages, continuing",
+                                        session_key, n);
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    info!("[WRITER] Session {} data channel closed", session_key);
+                                    break;
+                                }
                             }
                         }
-                        Ok(packet) = control_sub.recv() => {
-                            let op = if packet.is_empty() { 0 } else { packet[0] };
-                            info!("[WRITER] Session {} <- CONTROL opcode=0x{:02x} ({}) len={}",
-                                session_key, op, opcode_name(op), packet.len());
-                            if let Err(e) = writer.write_all(&packet).await {
-                                info!("[WRITER] Session {} control write error: {}", session_key, e);
-                                break;
-                            }
-                            if let Err(e) = writer.flush().await {
-                                info!("[WRITER] Session {} control flush error: {}", session_key, e);
-                                break;
+                        result = control_sub.recv() => {
+                            match result {
+                                Ok(packet) => {
+                                    let op = if packet.is_empty() { 0 } else { packet[0] };
+                                    info!("[WRITER] Session {} <- CONTROL opcode=0x{:02x} ({}) len={}",
+                                        session_key, op, opcode_name(op), packet.len());
+                                    if let Err(e) = writer.write_all(&packet).await {
+                                        info!("[WRITER] Session {} control write error: {}", session_key, e);
+                                        break;
+                                    }
+                                    if let Err(e) = writer.flush().await {
+                                        info!("[WRITER] Session {} control flush error: {}", session_key, e);
+                                        break;
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                    warn!("[WRITER] Session {} control lagged, missed {}", session_key, n);
+                                }
+                                Err(_) => break,
                             }
                         }
-                        Ok((src_session, packet)) = keyexchange_sub.recv() => {
-                            if src_session == session_key {
-                                continue;
-                            }
-                            let op = if packet.is_empty() { 0 } else { packet[0] };
-                            info!("[WRITER] Session {} <- KEYEXCHANGE (from session {}) opcode=0x{:02x} ({}) len={}",
-                                session_key, src_session, op, opcode_name(op), packet.len());
-                            if let Err(e) = writer.write_all(&packet).await {
-                                info!("[WRITER] Session {} keyexchange write error: {}", session_key, e);
-                                break;
-                            }
-                            if let Err(e) = writer.flush().await {
-                                info!("[WRITER] Session {} keyexchange flush error: {}", session_key, e);
-                                break;
+                        result = keyexchange_sub.recv() => {
+                            match result {
+                                Ok((src_session, packet)) => {
+                                    if src_session == session_key {
+                                        continue;
+                                    }
+                                    let op = if packet.is_empty() { 0 } else { packet[0] };
+                                    info!("[WRITER] Session {} <- KEYEXCHANGE (from session {}) opcode=0x{:02x} ({}) len={}",
+                                        session_key, src_session, op, opcode_name(op), packet.len());
+                                    if let Err(e) = writer.write_all(&packet).await {
+                                        info!("[WRITER] Session {} keyexchange write error: {}", session_key, e);
+                                        break;
+                                    }
+                                    if let Err(e) = writer.flush().await {
+                                        info!("[WRITER] Session {} keyexchange flush error: {}", session_key, e);
+                                        break;
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                    warn!("[WRITER] Session {} keyexchange lagged, missed {}", session_key, n);
+                                }
+                                Err(_) => break,
                             }
                         }
                         Some(packet) = direct_rx.recv() => {
@@ -764,6 +794,30 @@ impl RelayServer {
                 info!("[KEYEX] Session {} relayed to all peers", session_key);
                 Ok(())
             }
+            Opcode::KeyExchangeKem | Opcode::KeyExchangeDsa => {
+                if !*authenticated {
+                    info!(
+                        "[KEYEX] Session {} REJECTED: not authenticated",
+                        session_key
+                    );
+                    return Err(anyhow::anyhow!("not authenticated"));
+                }
+                let public_key = reader
+                    .read_len_prefixed()
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                info!(
+                    "[KEYEX] Session {} {} public_key={} bytes",
+                    session_key,
+                    opcode_name(opcode as u8),
+                    public_key.len()
+                );
+
+                let _ = self
+                    .keyexchange_tx
+                    .send((session_key, encode_key_exchange(&public_key)));
+                info!("[KEYEX] Session {} relayed to all peers", session_key);
+                Ok(())
+            }
             Opcode::AuthResult | Opcode::SyncResponse | Opcode::NewCertHash => {
                 info!(
                     "[IGNORE] Session {} received server->client opcode {:?}, ignoring",
@@ -873,6 +927,8 @@ fn try_read_packet(buf: &[u8]) -> Result<Option<usize>, ()> {
         0x05 => 1 + 4,       // Data: opcode + len prefix
         0x06 => 1 + 8,       // Heartbeat: opcode + u64
         0x08 => 1 + 4,       // KeyExchange: opcode + len prefix
+        0x09 => 1 + 4,       // KeyExchangeKem: opcode + len prefix
+        0x0A => 1 + 4,       // KeyExchangeDsa: opcode + len prefix
         _ => return Err(()), // Unknown opcode / server-only opcode -> violation
     };
     if buf.len() < min_len {
@@ -882,7 +938,7 @@ fn try_read_packet(buf: &[u8]) -> Result<Option<usize>, ()> {
     // For length-prefixed packets, read the length field. Only client→server
     // opcodes remain here (server→client ones already returned Err above).
     let len = match opcode {
-        0x01 | 0x05 | 0x08 => {
+        0x01 | 0x05 | 0x08 | 0x09 | 0x0A => {
             if buf.len() < 5 {
                 return Ok(None);
             }
