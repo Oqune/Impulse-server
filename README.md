@@ -17,16 +17,17 @@ Secure, **ephemeral** messenger server over **WebTransport (QUIC)** with
 ## Overview
 
 Impulse is a relay server for an end-to-end-encrypted messenger. The server
-**never sees plaintext** — clients encrypt message payloads locally and only
-hand the server opaque bytes, a sequence id, a timestamp, and a per-message
-public key. The server stores messages in RAM (TTL 72h), assigns monotonic
-ids, and broadcasts them to all connected clients.
+**never sees plaintext** — clients encrypt message payloads locally using
+Per-Recipient KEM Wrapping (ML-KEM-768 + AES-256-GCM) and only hand the server
+opaque bytes, a sequence id, a timestamp, and per-message public keys. The server
+stores messages in RAM (TTL 72h), assigns monotonic ids, and broadcasts them to
+all connected clients.
 
 Key design points:
 
 - **Transport:** WebTransport over QUIC only (`wtransport` 0.7). TLS 1.3 is
   mandatory; the old WSS transport was removed.
-- **Binary protocol:** length-prefixed binary frames with opcodes `0x01`–`0x08`
+- **Binary protocol:** length-prefixed binary frames with opcodes `0x01`–`0x0A`
   (little-endian), not JSON.
 - **Auth:** clients must send `Auth` with the password; the server verifies a
   SHA-256 hash in constant time.
@@ -216,6 +217,8 @@ followed by `len` bytes.
 | `0x06` | both | Heartbeat | `u64` client_timestamp (echoed back) |
 | `0x07` | S→C | NewCertHash | exactly 32 raw SHA-256 bytes + `u64` unix expiry |
 | `0x08` | C→S / S→C | KeyExchange | `len`-prefixed public key (relayed to other clients) |
+| `0x09` | C→S / S→C | KeyExchangeKem | `len`-prefixed ML-KEM-768 public key (relayed to other clients) |
+| `0x0A` | C→S / S→C | KeyExchangeDsa | `len`-prefixed ML-DSA-65 public key (relayed to other clients) |
 
 Unknown/invalid opcodes from a client close the connection. Idle streams are
 closed after 300s. Sessions are capped at 1024; oversized payloads (>1 MB) are
@@ -231,6 +234,11 @@ allocation, preventing CPU-DoS via inflated length prefixes (C1).
   announced via `NewCertHash`.
 - TOFU fingerprint pinning via QR code + `NewCertHash` control packet.
 - Post-quantum hybrid TLS key exchange (X25519Kyber768) via `aws-lc-rs`.
+- **Blind relay** — the server never decrypts message payloads. Clients encrypt
+  locally using Per-Recipient KEM Wrapping (ML-KEM-768 + AES-256-GCM) and the
+  server only sees opaque bytes. `KeyExchangeKem` (0x09) and `KeyExchangeDsa`
+  (0x0A) opcodes relay ML-KEM and ML-DSA-65 public keys identically to the
+  existing `KeyExchange` (0x08) — the server stores nothing and inspects nothing.
 - Ephemeral RAM-only storage, 72h TTL, bounded ring buffer and payload size.
 - Constant-time password-hash comparison.
 - Private key file restricted to `0600` on Unix; exclusive DACL on Windows.
@@ -250,7 +258,7 @@ written to `logs/` with daily rotation and 7-day retention.
 src/
   cert.rs      — ECDSA P-256 cert generation, rotation, SHA-256 TOFU fingerprint, FS persist
   storage.rs   — ephemeral in-RAM message log (TTL 72h, sequence ids)
-  protocol.rs  — binary wire frames (opcodes 0x01–0x08)
+  protocol.rs  — binary wire frames (opcodes 0x01–0x0A)
   server.rs    — WebTransport endpoint, session handling, broadcast relay
   tui.rs       — terminal UI: Server Info header, log stream, TOFU QR / fingerprint panel
   logging.rs   — tracing → TUI / rolling file bridge
