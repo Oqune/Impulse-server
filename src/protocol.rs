@@ -7,7 +7,7 @@
 //! The server never decrypts payloads; it only forwards opaque bytes.
 //!
 //! Opcodes:
-//! * `0x01` Auth          — client → server: password (UTF-8).
+//! * `0x01` Auth          — client → server: password hash (UTF-8).
 //! * `0x02` AuthResult    — server → client: status byte + optional message.
 //! * `0x03` Sync          — client → server: `last_seen_id` (u64).
 //! * `0x04` SyncResponse  — server → client: count (u32) + messages.
@@ -16,6 +16,9 @@
 //! * `0x06` Heartbeat     — either direction: client timestamp (u64).
 //! * `0x07` NewCertHash   — server → client: 32 raw SHA-256 bytes + expiry (u64).
 //! * `0x08` KeyExchange   — either direction: len (u32) + public key.
+//! * `0x09` KeyExchangeKem — either direction: ML-KEM public key.
+//! * `0x0A` KeyExchangeDsa — either direction: ML-DSA public key.
+//! * `0x0B` AuthChallenge — server → client: 16-byte random nonce.
 
 use std::io::{self};
 
@@ -33,6 +36,7 @@ pub enum Opcode {
     KeyExchange = 0x08,
     KeyExchangeKem = 0x09,
     KeyExchangeDsa = 0x0A,
+    AuthChallenge = 0x0B,
 }
 
 impl Opcode {
@@ -49,6 +53,7 @@ impl Opcode {
             0x08 => Some(Opcode::KeyExchange),
             0x09 => Some(Opcode::KeyExchangeKem),
             0x0A => Some(Opcode::KeyExchangeDsa),
+            0x0B => Some(Opcode::AuthChallenge),
             _ => None,
         }
     }
@@ -152,6 +157,10 @@ impl<'a> PacketReader<'a> {
     /// Read a length-prefixed (u32) byte blob.
     pub fn read_len_prefixed(&mut self) -> Result<Vec<u8>, ProtocolError> {
         let n = self.read_u32()? as usize;
+        const MAX_LEN_PREFIXED: usize = 1_000_000;
+        if n > MAX_LEN_PREFIXED {
+            return Err(ProtocolError::UnexpectedEof);
+        }
         self.read_bytes(n)
     }
 
@@ -203,7 +212,14 @@ impl PacketWriter {
 
     /// Append a length-prefixed (u32) byte blob.
     pub fn write_len_prefixed(&mut self, data: &[u8]) -> &mut Self {
+        debug_assert!(data.len() <= crate::server::MAX_PAYLOAD_BYTES as usize);
         self.write_u32(data.len() as u32);
+        self.buf.extend_from_slice(data);
+        self
+    }
+
+    /// Append raw bytes without a length prefix.
+    pub fn write_raw(&mut self, data: &[u8]) -> &mut Self {
         self.buf.extend_from_slice(data);
         self
     }
@@ -271,6 +287,22 @@ pub fn encode_key_exchange(public_key: &[u8]) -> Vec<u8> {
     w.into_bytes()
 }
 
+/// Build a tagged `KeyExchange` packet preserving the original opcode
+/// (0x09 for KEM, 0x0A for DSA) so clients can distinguish key types.
+pub fn encode_key_exchange_tagged(public_key: &[u8], opcode: Opcode) -> Vec<u8> {
+    let mut w = PacketWriter::with_opcode(opcode);
+    w.write_len_prefixed(public_key);
+    w.into_bytes()
+}
+
+/// Build an `AuthChallenge` packet (server→client: 16-byte nonce + B64 salt).
+pub fn encode_auth_challenge(nonce: &[u8], argon2_salt_b64: &str) -> Vec<u8> {
+    let mut w = PacketWriter::with_opcode(Opcode::AuthChallenge);
+    w.buf.extend_from_slice(nonce);           // 16 raw bytes
+    w.write_len_prefixed(argon2_salt_b64.as_bytes()); // u32 + B64 salt string
+    w.into_bytes()
+}
+
 /// A decoded client message ready to be relayed to all clients (server form).
 #[derive(Debug, Clone)]
 pub struct RelayedMessage {
@@ -286,26 +318,12 @@ impl RelayedMessage {
     }
 }
 
-/// Parsed client→server packets.
-#[derive(Debug, Clone)]
-pub enum ClientPacket {
-    Auth { password: Vec<u8> },
-    Sync { last_seen_id: u64 },
-    Data { payload: Vec<u8> },
-    Heartbeat { client_timestamp: u64 },
-    KeyExchange { public_key: Vec<u8> },
-}
-
 /// Server→client packet encoder.
 pub struct ServerPacketEncoder;
 
 impl ServerPacketEncoder {
     pub fn auth_result(ok: bool, message: Option<&str>) -> Vec<u8> {
         encode_auth_result(ok, message)
-    }
-
-    pub fn data(id: u64, timestamp: u64, payload: &[u8]) -> Vec<u8> {
-        encode_data(id, timestamp, payload)
     }
 
     pub fn sync_response(messages: &[(u64, u64, Vec<u8>)]) -> Vec<u8> {
@@ -318,9 +336,5 @@ impl ServerPacketEncoder {
 
     pub fn new_cert_hash(hash: &[u8; 32], expires_at: u64) -> Vec<u8> {
         encode_new_cert_hash(hash, expires_at)
-    }
-
-    pub fn key_exchange(public_key: &[u8]) -> Vec<u8> {
-        encode_key_exchange(public_key)
     }
 }

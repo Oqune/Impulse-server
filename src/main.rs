@@ -23,6 +23,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Err(e) = run(app_config, shutdown).await {
+        // The TUI thread may have put the terminal into raw mode / alternate
+        // screen. Clean up before printing the error so the user sees output.
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::LeaveAlternateScreen
+        );
         eprintln!("Fatal error: {}", e);
         std::process::exit(1);
     }

@@ -15,7 +15,7 @@ name = "impulse_server"
 path = "src/lib.rs"
 
 [[bin]]
-name = "Impulse-server"
+name = "impulse-server"
 path = "src/main.rs"
 
 [dependencies]
@@ -62,8 +62,11 @@ x509-parser = { version = "0.17", default-features = false }
 # Hex encoding
 hex = "0.4"
 
-# Constant-time comparisons (password auth)
-subtle = "2.6"
+# HMAC-SHA-256 for challenge-response auth
+hmac = "0.12"
+
+# Argon2id for password hashing (--hash-password CLI)
+argon2 = "0.5"
 
 # CLI + config
 clap = { version = "4", features = ["derive"] }

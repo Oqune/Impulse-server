@@ -4,7 +4,7 @@
 //! * `cert` — self-signed ECDSA P-256 certificate generation, 14-day TTL,
 //!   2-day overlap rotation, SHA-256 TOFU fingerprint.
 //! * `storage` — ephemeral in-RAM message log with 72h TTL and sequence ids.
-//! * `protocol` — binary wire frames (opcodes 0x01–0x08) over WebTransport.
+//! * `protocol` — binary wire frames (opcodes 0x01–0x0B) over WebTransport.
 //! * `server` — WebTransport endpoint, session handling and broadcast relay.
 //! * `tui` — terminal UI: Server Info header, log stream, TOFU QR / fingerprint panel.
 //! * `logging` — `tracing` → TUI / file bridge.
@@ -31,21 +31,24 @@ use crate::tui::CertView;
 
 /// High-level entry point used by `main.rs`.
 ///
-/// 1. Loads / generates the certificate.
-/// 2. Spawns the TUI (logs + TOFU QR).
-/// 3. Wires `tracing` into the TUI + rotating log file.
-/// 4. Starts the WebTransport relay, shutting it down when `shutdown` fires.
+/// 1. Creates required directories.
+/// 2. Loads / generates the certificate.
+/// 3. Spawns the TUI (logs + TOFU QR).
+/// 4. Wires `tracing` into the TUI + rotating log file.
+/// 5. Starts the WebTransport relay, shutting it down when `shutdown` fires.
 pub async fn run(app_config: AppConfig, shutdown: Arc<Notify>) -> Result<()> {
-    let cert_manager = Arc::new(std::sync::Mutex::new(CertManager::load_or_create(
+    // Ensure certificate directory exists.
+    std::fs::create_dir_all(&app_config.server.cert_dir)?;
+
+    // Ensure logs directory exists.
+    let _ = std::fs::create_dir_all("logs");
+
+    let cert_manager = Arc::new(tokio::sync::Mutex::new(CertManager::load_or_create(
         std::path::Path::new(&app_config.server.cert_dir),
         app_config.server.san.clone(),
     )?));
 
-    let initial_cert = cert_manager
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .current()
-        .clone();
+    let initial_cert = cert_manager.lock().await.current().clone();
     let cert_view = CertView::from_cert(&initial_cert);
     let tofu_payload = cert_view.tofu_qr_string();
 
@@ -59,11 +62,9 @@ pub async fn run(app_config: AppConfig, shutdown: Arc<Notify>) -> Result<()> {
     // when the QR code cannot be scanned.
     tracing::info!("TOFU payload: {}", tofu_payload);
 
-    let relay = Arc::new(server::RelayServer::new(
-        app_config.server.clone(),
-        cert_manager,
-        tui,
-    )?);
+    let relay = Arc::new(
+        server::RelayServer::new(app_config.server.clone(), cert_manager, tui).await?,
+    );
 
     relay.run(shutdown).await
 }

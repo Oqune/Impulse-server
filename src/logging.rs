@@ -46,7 +46,6 @@ impl<S: tracing::Subscriber> Layer<S> for TuiLogLayer {
         let level = *event.metadata().level();
         let target = event.metadata().target().to_string();
 
-        // Render the message fields into a single string.
         let mut message = String::new();
         let mut visitor = MessageVisitor(&mut message);
         event.record(&mut visitor);
@@ -82,26 +81,38 @@ impl<'a> tracing::field::Visit for MessageVisitor<'a> {
 pub fn init_tracing(tui: TuiHandle, env_filter: &str) {
     let tui_layer = TuiLogLayer { tui };
 
+    // Ensure the logs directory exists before creating the rolling file appender.
+    let _ = std::fs::create_dir_all("logs");
+
     use tracing_appender::rolling::{self, Rotation};
-    let file_layer = rolling::Builder::default()
+    let file_layer = match rolling::Builder::default()
         .rotation(Rotation::DAILY)
         .max_log_files(7)
         .filename_prefix("impulse-server")
         .filename_suffix(".log")
         .build("logs")
-        .expect("failed to initialize rolling file logger");
+    {
+        Ok(layer) => Some(
+            tracing_subscriber::fmt::layer()
+                .with_writer(layer)
+                .with_timer(BracketTimer)
+                .with_ansi(false)
+                .with_filter(
+                    tracing_subscriber::EnvFilter::try_new(env_filter)
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                ),
+        ),
+        Err(e) => {
+            eprintln!("Warning: could not create log file layer: {}", e);
+            None
+        }
+    };
 
-    let registry = tracing_subscriber::registry().with(
-        tracing_subscriber::fmt::layer()
-            .with_writer(file_layer)
-            .with_timer(BracketTimer)
-            .with_ansi(false)
-            .with_filter(
-                tracing_subscriber::EnvFilter::try_new(env_filter)
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-            ),
-    );
+    let registry = tracing_subscriber::registry().with(tui_layer);
 
-    // Try to set as global default; ignore error if already set.
-    let _ = registry.with(tui_layer).try_init();
+    if let Some(fl) = file_layer {
+        let _ = registry.with(fl).try_init();
+    } else {
+        let _ = registry.try_init();
+    }
 }

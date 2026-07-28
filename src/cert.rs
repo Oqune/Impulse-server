@@ -202,7 +202,7 @@ impl CertManager {
         let key_der = Arc::new(key.secret_der().to_vec());
 
         let (not_before, not_after) = parse_validity(&der)
-            .unwrap_or_else(|| (SystemTime::now(), SystemTime::now() + CERT_VALIDITY));
+            .ok_or_else(|| anyhow::anyhow!("failed to parse X.509 validity from certificate; cert may be corrupted"))?;
 
         let fingerprint = Cert::fingerprint_of(&der);
         Ok(Cert {
@@ -235,6 +235,8 @@ impl CertManager {
                 sans.push(SanType::IpAddress(ip));
             } else if let Ok(dns) = extra.as_str().try_into() {
                 sans.push(SanType::DnsName(dns));
+            } else {
+                warn!("Ignoring invalid SAN '{}': not a valid IP or DNS name", extra);
             }
         }
         params.subject_alt_names = sans;
@@ -252,9 +254,18 @@ impl CertManager {
         let key_der = Arc::new(key_pair.serialize_der());
         let fingerprint = Cert::fingerprint_of(&der);
 
-        std::fs::write(dir.join(CERT_FILE), &pem_cert)?;
+        // Atomic persistence: write to temp files first, then rename.
+        // A crash between cert and key write would leave orphaned files;
+        // atomic rename prevents this by ensuring both files update together.
+        let cert_tmp = dir.join(format!("{}.tmp", CERT_FILE));
+        let key_tmp = dir.join(format!("{}.tmp", KEY_FILE));
         let key_path = dir.join(KEY_FILE);
-        std::fs::write(&key_path, &pem_key)?;
+        std::fs::write(&cert_tmp, &pem_cert)?;
+        std::fs::write(&key_tmp, &pem_key)?;
+        // Rename key first (most critical), then cert. If cert rename fails,
+        // we have a key with no cert — less dangerous than cert with no key.
+        std::fs::rename(&key_tmp, &key_path)?;
+        std::fs::rename(&cert_tmp, dir.join(CERT_FILE))?;
         // Restrict the private key so only the current process/user can read the
         // signing material (E5). On Unix we use POSIX mode 0600; on Windows we
         // rewrite the DACL to grant access only to the current user.

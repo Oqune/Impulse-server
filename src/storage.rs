@@ -9,8 +9,10 @@
 //! A bounded ring buffer (by count) plus a TTL sweep bounds memory usage.
 
 use dashmap::DashMap;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::warn;
 
 /// How long a message stays available for late joiners before being dropped.
 pub const MESSAGE_TTL: Duration = Duration::from_secs(60 * 60 * 24 * 3); // 72 hours
@@ -29,13 +31,21 @@ pub struct StoredMessage {
     pub timestamp: u64,
 }
 
+/// Lock helper that recovers from poisoned mutexes with a warning.
+fn lock_order(mutex: &std::sync::Mutex<VecDeque<u64>>) -> std::sync::MutexGuard<'_, VecDeque<u64>> {
+    mutex.lock().unwrap_or_else(|e| {
+        warn!("order mutex poisoned, recovering: {}", e);
+        e.into_inner()
+    })
+}
+
 /// In-memory message log with TTL eviction and sequence-id ordering.
 #[derive(Default)]
 pub struct MessageStore {
     inner: DashMap<u64, StoredMessage>,
     next_id: AtomicU64,
     /// Ordered list of ids, used to implement the ring-buffer cap and TTL sweep.
-    order: std::sync::Mutex<Vec<u64>>,
+    order: std::sync::Mutex<VecDeque<u64>>,
 }
 
 impl MessageStore {
@@ -43,13 +53,13 @@ impl MessageStore {
         Self {
             inner: DashMap::new(),
             next_id: AtomicU64::new(1),
-            order: std::sync::Mutex::new(Vec::with_capacity(MAX_MESSAGES)),
+            order: std::sync::Mutex::new(VecDeque::with_capacity(MAX_MESSAGES)),
         }
     }
 
     /// Allocate the next sequence id without storing yet.
     fn alloc_id(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::SeqCst)
+        self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Append a message, returning the stored record (id + timestamp + payload).
@@ -71,11 +81,11 @@ impl MessageStore {
         };
         self.inner.insert(id, msg.clone());
         {
-            let mut order = self.order.lock().unwrap_or_else(|e| e.into_inner());
-            order.push(id);
+            let mut order = lock_order(&self.order);
+            order.push_back(id);
             while order.len() > MAX_MESSAGES {
-                if let Some(oldest) = order.first().copied() {
-                    order.remove(0);
+                if let Some(oldest) = order.front().copied() {
+                    order.pop_front();
                     self.inner.remove(&oldest);
                 } else {
                     break;
@@ -90,7 +100,7 @@ impl MessageStore {
     /// (`limit`) prevents a single `Sync` from replaying the entire buffer and
     /// producing a multi-hundred-MB response (C3).
     pub fn since(&self, after_id: u64, limit: usize) -> Vec<StoredMessage> {
-        let order = self.order.lock().unwrap_or_else(|e| e.into_inner());
+        let order = lock_order(&self.order);
         order
             .iter()
             .copied()
@@ -118,7 +128,7 @@ impl MessageStore {
             self.inner.remove(&id);
         }
         if removed > 0 {
-            let mut order = self.order.lock().unwrap_or_else(|e| e.into_inner());
+            let mut order = lock_order(&self.order);
             order.retain(|id| self.inner.contains_key(id));
         }
         removed
@@ -126,9 +136,5 @@ impl MessageStore {
 
     pub fn len(&self) -> usize {
         self.inner.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
     }
 }

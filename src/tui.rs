@@ -277,7 +277,6 @@ pub fn run_tui(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     filtered: &[&LogRecord],
@@ -335,7 +334,7 @@ fn draw(
             .constraints([Constraint::Length(1), Constraint::Min(5)])
             .split(cols[1]);
 
-        draw_info(f, left_rows[0], info, cert, stats, has_clipboard, last_copy);
+        draw_info(f, left_rows[0], info, cert, stats);
         draw_qr(f, left_rows[1], cert);
         draw_cert_info(f, left_rows[2], cert);
         draw_help_bar(f, right_rows[0], state, has_clipboard, last_copy);
@@ -444,14 +443,25 @@ fn draw_help_bar(
     f.render_widget(bar, area);
 }
 
+fn format_timestamp(ts: SystemTime) -> String {
+    let dur = ts.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = dur.as_secs();
+    let millis = dur.subsec_millis();
+    format!(
+        "[{:02}:{:02}:{:02}.{:03}]",
+        (secs / 3600) % 24,
+        (secs / 60) % 60,
+        secs % 60,
+        millis
+    )
+}
+
 fn draw_info(
     f: &mut ratatui::Frame,
     area: Rect,
     info: &ServerInfo,
     cert: &CertView,
     stats: &(usize, usize),
-    _has_clipboard: bool,
-    _last_copy: &Option<SystemTime>,
 ) {
     let fp = if cert.fingerprint_raw.len() >= 16 {
         &cert.fingerprint_raw[..16]
@@ -548,16 +558,7 @@ fn draw_logs(f: &mut ratatui::Frame, area: Rect, filtered: &[&LogRecord], state:
                 Level::DEBUG => "DBG",
                 Level::TRACE => "TRC",
             };
-            let ts = rec.timestamp.duration_since(UNIX_EPOCH).unwrap_or_default();
-            let secs = ts.as_secs();
-            let millis = ts.subsec_millis();
-            let ts_str = format!(
-                "[{:02}:{:02}:{:02}.{:03}]",
-                (secs / 3600) % 24,
-                (secs / 60) % 60,
-                secs % 60,
-                millis
-            );
+            let ts_str = format_timestamp(rec.timestamp);
 
             Line::from(vec![
                 Span::styled(ts_str, Style::default().fg(Color::DarkGray)),
@@ -610,16 +611,7 @@ fn copy_logs_to_clipboard(logs: &[LogRecord], clipboard: &mut Option<ClipboardCo
         let text: String = logs
             .iter()
             .map(|rec| {
-                let ts = rec.timestamp.duration_since(UNIX_EPOCH).unwrap_or_default();
-                let secs = ts.as_secs();
-                let millis = ts.subsec_millis();
-                let ts_str = format!(
-                    "[{:02}:{:02}:{:02}.{:03}]",
-                    (secs / 3600) % 24,
-                    (secs / 60) % 60,
-                    secs % 60,
-                    millis
-                );
+                let ts_str = format_timestamp(rec.timestamp);
                 let lvl = match rec.level {
                     Level::ERROR => "ERR",
                     Level::WARN => "WRN",
@@ -762,11 +754,28 @@ pub fn spawn_tui(
     let s_clone = (session_count.clone(), message_count.clone());
     let info_clone = info.clone();
     let shutdown_clone = shutdown.clone();
+
+    // Use a oneshot channel to propagate TUI init errors back to the caller.
+    let (init_tx, init_rx) = crossbeam_channel::bounded::<anyhow::Result<()>>(1);
     std::thread::spawn(move || {
-        if let Err(e) = run_tui(log_rx, cert_clone, s_clone, info_clone, shutdown_clone) {
-            eprintln!("TUI error: {}", e);
-        }
+        let result = run_tui(log_rx, cert_clone, s_clone, info_clone, shutdown_clone);
+        let _ = init_tx.send(result);
     });
+
+    // Wait briefly for the TUI to initialize (enable_raw_mode, etc.).
+    // If it fails, return the error so the process can clean up gracefully.
+    match init_rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(())) => {
+            // TUI exited normally (user pressed 'q'). This is fine.
+        }
+        Ok(Err(e)) => {
+            // TUI failed to start (e.g., not a terminal, permissions issue).
+            return Err(anyhow::anyhow!("TUI failed to start: {}", e));
+        }
+        Err(_) => {
+            // Timeout — TUI is running (expected). Proceed.
+        }
+    }
 
     Ok(TuiHandle {
         log_tx,

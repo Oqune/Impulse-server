@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -22,7 +23,8 @@ use wtransport::{Endpoint, ServerConfig};
 use crate::cert::CertManager;
 use crate::cert::DynamicCertResolver;
 use crate::protocol::{
-    Opcode, PacketReader, RelayedMessage, ServerPacketEncoder, encode_key_exchange,
+    Opcode, PacketReader, RelayedMessage, ServerPacketEncoder, encode_auth_challenge,
+    encode_key_exchange, encode_key_exchange_tagged,
 };
 use crate::storage::MessageStore;
 use crate::tui::TuiHandle;
@@ -39,6 +41,7 @@ fn opcode_name(b: u8) -> &'static str {
         0x08 => "KeyExchange",
         0x09 => "KeyExchangeKem",
         0x0A => "KeyExchangeDsa",
+        0x0B => "AuthChallenge",
         _ => "UNKNOWN",
     }
 }
@@ -58,10 +61,15 @@ fn hex_dump(bytes: &[u8], max: usize) -> String {
 }
 
 /// Max incoming message payload size (bytes) to bound memory.
-const MAX_PAYLOAD_BYTES: usize = 1_000_000;
+pub(crate) const MAX_PAYLOAD_BYTES: usize = 1_000_000;
 
 /// Max bytes buffered from a single stream before we give up (defensive).
 const MAX_STREAM_BUFFER: usize = 8 * 1024 * 1024;
+
+/// Aggregate memory budget across all sessions. When total buffered bytes
+/// across all reader tasks exceed this, new reads are rejected to prevent
+/// memory exhaustion DoS (E4).
+const MAX_TOTAL_BUFFERED_BYTES: usize = 512 * 1024 * 1024; // 512 MB
 
 /// How often to sweep expired messages / rotate certs.
 const HOUSEKEEP_INTERVAL: Duration = Duration::from_secs(60);
@@ -88,10 +96,22 @@ const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(10);
 /// WebTransport handshake timeout.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Challenge nonce size (bytes).
+const NONCE_LEN: usize = 16;
+
+/// Maximum age of a challenge nonce before it expires.
+const NONCE_MAX_AGE: Duration = Duration::from_secs(30);
+
+/// Maximum auth attempts per session before forced disconnect.
+const MAX_AUTH_ATTEMPTS: u32 = 5;
+
+/// Prune rate limiter entries older than this.
+const IP_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+
 /// Shared server state.
 pub struct RelayServer {
     config: crate::config::ServerSettings,
-    cert_manager: Arc<std::sync::Mutex<CertManager>>,
+    cert_manager: Arc<tokio::sync::Mutex<CertManager>>,
     store: Arc<MessageStore>,
     /// Broadcast hub for relayed data messages.
     data_tx: broadcast::Sender<RelayedMessage>,
@@ -109,35 +129,59 @@ pub struct RelayServer {
     /// in `new()`; the certificate resolver is swapped on rotation without
     /// recreating the endpoint (see E1). Taken out of the `Mutex` in `run`.
     endpoint: Arc<tokio::sync::Mutex<Option<wtransport::Endpoint<endpoint_side::Server>>>>,
+    /// Optional second endpoint for IPv6 dual-stack.
+    endpoint6: Arc<tokio::sync::Mutex<Option<wtransport::Endpoint<endpoint_side::Server>>>>,
     /// Bounds the number of concurrent sessions to protect against DoS (see E4).
     session_semaphore: Arc<Semaphore>,
     /// Per-IP rate limiter (connection attempts within sliding window).
-    ip_connections: Arc<std::sync::Mutex<HashMap<IpAddr, Vec<Instant>>>>,
+    ip_connections: Arc<tokio::sync::Mutex<HashMap<IpAddr, Vec<Instant>>>>,
+    /// Per-session auth challenge nonces (session_id -> (nonce, created_at)).
+    auth_nonces: Arc<DashMap<u64, (Vec<u8>, Instant)>>,
+    /// Per-session auth attempt counters.
+    auth_attempts: Arc<DashMap<u64, AtomicU32>>,
     tui: TuiHandle,
     /// Password hash for authentication (SHA-256 hex).
     password_hash: String,
+    /// Atomic counter for unique session keys (wtransport session_id returns 0 for all connections).
+    next_session_id: Arc<AtomicU64>,
+    /// Aggregate bytes currently buffered across all reader tasks (DoS protection).
+    total_buffered_bytes: Arc<AtomicUsize>,
+    /// Stored key exchange packets per session, replayed to newly authenticated peers.
+    key_exchange_store: Arc<DashMap<u64, Vec<Vec<u8>>>>,
 }
 
 impl RelayServer {
-    pub fn new(
+    pub async fn new(
         config: crate::config::ServerSettings,
-        cert_manager: Arc<std::sync::Mutex<CertManager>>,
+        cert_manager: Arc<tokio::sync::Mutex<CertManager>>,
         tui: TuiHandle,
     ) -> anyhow::Result<Self> {
         let cert_manager = cert_manager.clone();
-        let (tls_config, cert_resolver) = cert_manager
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .build_dynamic_tls_config()
-            .map_err(|e| anyhow::anyhow!("failed to build TLS config: {}", e))?;
+        let (tls_config, cert_resolver) = {
+            let cm = cert_manager.lock().await;
+            cm.build_dynamic_tls_config()
+                .map_err(|e| anyhow::anyhow!("failed to build TLS config: {}", e))?
+        };
         let session_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_SESSIONS));
 
         let server_config = ServerConfig::builder()
             .with_bind_address(config.address.parse()?)
-            .with_custom_tls(tls_config)
+            .with_custom_tls(tls_config.clone())
             .keep_alive_interval(Some(Duration::from_secs(15)))
             .build();
         let endpoint = Endpoint::server(server_config)?;
+
+        // Optional IPv6 endpoint (separate socket).
+        let endpoint6 = if !config.address6.is_empty() {
+            let server_config6 = ServerConfig::builder()
+                .with_bind_address(config.address6.parse()?)
+                .with_custom_tls(tls_config)
+                .keep_alive_interval(Some(Duration::from_secs(15)))
+                .build();
+            Some(Endpoint::server(server_config6)?)
+        } else {
+            None
+        };
 
         let store = Arc::new(MessageStore::new());
         let (data_tx, _rx) = broadcast::channel(1024);
@@ -154,15 +198,26 @@ impl RelayServer {
             sessions: Arc::new(DashMap::new()),
             cert_resolver,
             endpoint: Arc::new(tokio::sync::Mutex::new(Some(endpoint))),
+            endpoint6: Arc::new(tokio::sync::Mutex::new(endpoint6)),
             session_semaphore,
-            ip_connections: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            ip_connections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            auth_nonces: Arc::new(DashMap::new()),
+            auth_attempts: Arc::new(DashMap::new()),
             tui: tui.clone(),
             password_hash: config.password_hash.clone(),
+            next_session_id: Arc::new(AtomicU64::new(0)),
+            total_buffered_bytes: Arc::new(AtomicUsize::new(0)),
+            key_exchange_store: Arc::new(DashMap::new()),
         };
 
         // Publish static technical info for the TUI header block.
+        let display_address = if config.address6.is_empty() {
+            config.address.clone()
+        } else {
+            format!("{}, {}", config.address, config.address6)
+        };
         tui.set_info(crate::tui::ServerInfo {
-            address: config.address.clone(),
+            address: display_address,
             san_count: config.san.len(),
             ttl_hours: crate::storage::MESSAGE_TTL.as_secs() / 3600,
             max_payload: MAX_PAYLOAD_BYTES,
@@ -183,19 +238,49 @@ impl RelayServer {
             .ok_or_else(|| anyhow::anyhow!("endpoint already taken"))?;
         drop(endpoint_guard);
 
+        let mut endpoint6_guard = self.endpoint6.lock().await;
+        let server6 = endpoint6_guard.take();
+        drop(endpoint6_guard);
+
         // Spawn housekeeping (sweep + rotation + TUI cert refresh).
         self.clone().spawn_housekeeping();
 
         info!("WebTransport relay listening on {}", self.config.address);
+        if !self.config.address6.is_empty() {
+            info!(
+                "WebTransport relay (IPv6) listening on {}",
+                self.config.address6
+            );
+        }
         info!(
             "TOFU fingerprint: {}",
             self.cert_manager
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .await
                 .current()
                 .fingerprint_grouped()
         );
 
+        // Run IPv4 accept loop; optionally run IPv6 in parallel.
+        if let Some(server6) = server6 {
+            let self2 = self.clone();
+            let shutdown2 = shutdown.clone();
+            tokio::join!(
+                Self::accept_loop(self, server, shutdown),
+                Self::accept_loop(self2, server6, shutdown2),
+            );
+        } else {
+            Self::accept_loop(self, server, shutdown).await;
+        }
+
+        Ok(())
+    }
+
+    async fn accept_loop(
+        self: Arc<Self>,
+        server: wtransport::Endpoint<endpoint_side::Server>,
+        shutdown: std::sync::Arc<tokio::sync::Notify>,
+    ) {
         loop {
             #[allow(clippy::large_enum_variant)]
             enum Next {
@@ -243,7 +328,7 @@ impl RelayServer {
                     // Per-IP rate limiting: reject if too many recent connections
                     // from the same address (within RATE_LIMIT_WINDOW).
                     let remote_ip = connection.remote_address().ip();
-                    if !self.check_rate_limit(remote_ip) {
+                    if !self.check_rate_limit(remote_ip).await {
                         connection.close(wtransport::VarInt::from(0u32), b"rate_limit");
                         continue;
                     }
@@ -263,9 +348,19 @@ impl RelayServer {
                             continue;
                         }
                     };
+                    // Generate a unique session key via atomic counter.
+                    // wtransport's connection.session_id() returns 0 for all
+                    // connections, so we must use our own counter to ensure
+                    // each session gets a unique key for broadcast exclusion.
+                    let session_key = self.next_session_id.fetch_add(1, Ordering::Relaxed);
+                    info!(
+                        "[CONNECT] Assigned session_key={} for remote {}",
+                        session_key,
+                        connection.remote_address()
+                    );
                     // Spawn each session as its own task so the accept loop is never
                     // blocked by a single slow/abandoned client (K1/K2).
-                    tokio::spawn(self.clone().handle_wt_session(connection, permit));
+                    tokio::spawn(self.clone().handle_wt_session(connection, permit, session_key));
                 }
             }
         }
@@ -275,17 +370,13 @@ impl RelayServer {
         server.close(wtransport::VarInt::from(0u32), b"shutdown");
         self.sessions.clear();
         info!("Relay stopped");
-        Ok(())
     }
 
     /// Per-IP rate limiting shared by both transports. Returns `true` if the
     /// connection is allowed, `false` if it should be rejected.
-    fn check_rate_limit(&self, remote_ip: IpAddr) -> bool {
+    async fn check_rate_limit(&self, remote_ip: IpAddr) -> bool {
         let now = Instant::now();
-        let mut ip_map = self
-            .ip_connections
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut ip_map = self.ip_connections.lock().await;
         let times = ip_map.entry(remote_ip).or_default();
         times.retain(|t| now.duration_since(*t) < RATE_LIMIT_WINDOW);
         if times.len() >= MAX_CONNECTIONS_PER_IP {
@@ -301,6 +392,21 @@ impl RelayServer {
         true
     }
 
+    /// Prune expired IP entries from the rate limiter to prevent memory leaks.
+    async fn prune_rate_limiter(&self) {
+        let now = Instant::now();
+        let mut ip_map = self.ip_connections.lock().await;
+        let before = ip_map.len();
+        ip_map.retain(|_, times| {
+            times.retain(|t| now.duration_since(*t) < RATE_LIMIT_WINDOW);
+            !times.is_empty()
+        });
+        let pruned = before - ip_map.len();
+        if pruned > 0 {
+            debug!("Pruned {} expired IP rate-limiter entries", pruned);
+        }
+    }
+
     // ------------------------------------------------------------------
     // WebTransport session entry point
     // ------------------------------------------------------------------
@@ -309,8 +415,8 @@ impl RelayServer {
         self: Arc<Self>,
         connection: wtransport::Connection,
         _permit: tokio::sync::OwnedSemaphorePermit,
+        session_key: u64,
     ) {
-        let session_key: u64 = connection.session_id().into_u64();
         let remote_ip = connection.remote_address().ip();
 
         // Accept the bidirectional stream opened by the client. WebTransport uses
@@ -324,7 +430,7 @@ impl RelayServer {
             "[STREAM] Session {} waiting to accept bidirectional stream...",
             session_key
         );
-        let (send_stream, recv_stream) = match connection.accept_bi().await {
+        let (mut send_stream, recv_stream) = match connection.accept_bi().await {
             Ok(pair) => {
                 info!("[STREAM] Session {} stream accepted OK", session_key);
                 pair
@@ -335,6 +441,45 @@ impl RelayServer {
                 return;
             }
         };
+
+        // Generate and send auth challenge nonce to prevent replay attacks.
+        let nonce: Vec<u8> = (0..NONCE_LEN)
+            .map(|_| rand::random::<u8>())
+            .collect();
+        self.auth_nonces
+            .insert(session_key, (nonce.clone(), Instant::now()));
+        self.auth_attempts
+            .insert(session_key, AtomicU32::new(0));
+
+        // Extract B64 salt from stored Argon2 hash for the challenge
+        let argon2_salt_b64 = {
+            use argon2::password_hash::PasswordHash;
+            match PasswordHash::new(&self.password_hash) {
+                Ok(parsed) => parsed.salt.map(|s| s.to_string()).unwrap_or_default(),
+                Err(_) => String::new(),
+            }
+        };
+
+        // Send challenge: [0x0B] + 16 raw nonce bytes + len-prefixed B64 salt.
+        if let Err(e) = send_stream
+            .write_all(&encode_auth_challenge(&nonce, &argon2_salt_b64))
+            .await
+        {
+            warn!("[STREAM] Session {} failed to send challenge: {}", session_key, e);
+            // Clean up auth entries to prevent memory leak
+            self.auth_nonces.remove(&session_key);
+            self.auth_attempts.remove(&session_key);
+            connection.close(wtransport::VarInt::from(0u32), b"challenge");
+            return;
+        }
+        if let Err(e) = send_stream.flush().await {
+            warn!("[STREAM] Session {} failed to flush challenge: {}", session_key, e);
+            self.auth_nonces.remove(&session_key);
+            self.auth_attempts.remove(&session_key);
+            connection.close(wtransport::VarInt::from(0u32), b"flush");
+            return;
+        }
+        info!("[STREAM] Session {} sent auth challenge", session_key);
 
         self.run_session(session_key, remote_ip, recv_stream, send_stream, _permit)
             .await;
@@ -347,7 +492,7 @@ impl RelayServer {
     async fn run_session<R, W>(
         self: Arc<Self>,
         session_key: u64,
-        _remote_ip: IpAddr,
+        _remote_ip: std::net::IpAddr,
         mut reader: R,
         mut writer: W,
         _permit: tokio::sync::OwnedSemaphorePermit,
@@ -378,14 +523,14 @@ impl RelayServer {
                                 Ok(msg) => {
                                     let packet = msg.to_packet();
                                     let op = if packet.is_empty() { 0 } else { packet[0] };
-                                    info!("[WRITER] Session {} <- DATA relay opcode=0x{:02x} ({}) len={}",
+                                    debug!("[WRITER] Session {} <- DATA relay opcode=0x{:02x} ({}) len={}",
                                         session_key, op, opcode_name(op), packet.len());
-                                    if let Err(e) = writer.write_all(&packet).await {
-                                        info!("[WRITER] Session {} write error: {}", session_key, e);
+                                            if let Err(e) = writer.write_all(&packet).await {
+                                        warn!("[WRITER] Session {} write error: {}", session_key, e);
                                         break;
                                     }
                                     if let Err(e) = writer.flush().await {
-                                        info!("[WRITER] Session {} flush error: {}", session_key, e);
+                                        warn!("[WRITER] Session {} flush error: {}", session_key, e);
                                         break;
                                     }
                                 }
@@ -403,14 +548,14 @@ impl RelayServer {
                             match result {
                                 Ok(packet) => {
                                     let op = if packet.is_empty() { 0 } else { packet[0] };
-                                    info!("[WRITER] Session {} <- CONTROL opcode=0x{:02x} ({}) len={}",
+                                    debug!("[WRITER] Session {} <- CONTROL opcode=0x{:02x} ({}) len={}",
                                         session_key, op, opcode_name(op), packet.len());
                                     if let Err(e) = writer.write_all(&packet).await {
-                                        info!("[WRITER] Session {} control write error: {}", session_key, e);
+                                        warn!("[WRITER] Session {} control write error: {}", session_key, e);
                                         break;
                                     }
                                     if let Err(e) = writer.flush().await {
-                                        info!("[WRITER] Session {} control flush error: {}", session_key, e);
+                                        warn!("[WRITER] Session {} control flush error: {}", session_key, e);
                                         break;
                                     }
                                 }
@@ -427,14 +572,14 @@ impl RelayServer {
                                         continue;
                                     }
                                     let op = if packet.is_empty() { 0 } else { packet[0] };
-                                    info!("[WRITER] Session {} <- KEYEXCHANGE (from session {}) opcode=0x{:02x} ({}) len={}",
+                                    debug!("[WRITER] Session {} <- KEYEXCHANGE (from session {}) opcode=0x{:02x} ({}) len={}",
                                         session_key, src_session, op, opcode_name(op), packet.len());
                                     if let Err(e) = writer.write_all(&packet).await {
-                                        info!("[WRITER] Session {} keyexchange write error: {}", session_key, e);
+                                        warn!("[WRITER] Session {} keyexchange write error: {}", session_key, e);
                                         break;
                                     }
                                     if let Err(e) = writer.flush().await {
-                                        info!("[WRITER] Session {} keyexchange flush error: {}", session_key, e);
+                                        warn!("[WRITER] Session {} keyexchange flush error: {}", session_key, e);
                                         break;
                                     }
                                 }
@@ -446,14 +591,14 @@ impl RelayServer {
                         }
                         Some(packet) = direct_rx.recv() => {
                             let op = if packet.is_empty() { 0 } else { packet[0] };
-                            info!("[WRITER] Session {} <- DIRECT opcode=0x{:02x} ({}) len={}",
+                            debug!("[WRITER] Session {} <- DIRECT opcode=0x{:02x} ({}) len={}",
                                 session_key, op, opcode_name(op), packet.len());
                             if let Err(e) = writer.write_all(&packet).await {
-                                info!("[WRITER] Session {} direct write error: {}", session_key, e);
+                                warn!("[WRITER] Session {} direct write error: {}", session_key, e);
                                 break;
                             }
                             if let Err(e) = writer.flush().await {
-                                info!("[WRITER] Session {} direct flush error: {}", session_key, e);
+                                warn!("[WRITER] Session {} direct flush error: {}", session_key, e);
                                 break;
                             }
                         }
@@ -473,6 +618,7 @@ impl RelayServer {
         let reader_task = {
             let this = self.clone();
             let direct_tx = direct_tx.clone();
+            let total_buffered = self.total_buffered_bytes.clone();
             tokio::spawn(async move {
                 info!("[READER] Session {} reader task started", session_key);
                 let mut buf: Vec<u8> = Vec::with_capacity(4096);
@@ -488,23 +634,44 @@ impl RelayServer {
                             break; // EOF
                         }
                         Ok(Ok(n)) => {
-                            debug!("[READER] Session {} raw chunk: {} bytes", session_key, n);
-                            debug!(
-                                "[READER] Session {} hex: {}",
-                                session_key,
-                                hex_dump(&chunk[..n], 128)
-                            );
+                            if tracing::enabled!(tracing::Level::DEBUG) {
+                                debug!("[READER] Session {} raw chunk: {} bytes", session_key, n);
+                                debug!(
+                                    "[READER] Session {} hex: {}",
+                                    session_key,
+                                    hex_dump(&chunk[..n], 128)
+                                );
+                            }
+                            // Extend buffer first, then update aggregate budget.
                             buf.extend_from_slice(&chunk[..n]);
+                            let new_total = total_buffered.fetch_add(n, Ordering::Relaxed) + n;
+                            if new_total > MAX_TOTAL_BUFFERED_BYTES {
+                                // Roll back: remove the bytes we just added.
+                                let rollback = buf.len().min(n);
+                                buf.truncate(buf.len() - rollback);
+                                total_buffered.fetch_sub(rollback, Ordering::Relaxed);
+                                warn!(
+                                    "[READER] Session {} AGGREGATE MEMORY BUDGET EXCEEDED ({} > {}), closing",
+                                    session_key,
+                                    new_total,
+                                    MAX_TOTAL_BUFFERED_BYTES
+                                );
+                                break;
+                            }
                             debug!(
-                                "[READER] Session {} buffer now {} bytes",
+                                "[READER] Session {} buffer now {} bytes (aggregate: {})",
                                 session_key,
-                                buf.len()
+                                buf.len(),
+                                new_total
                             );
                             if buf.len() > MAX_STREAM_BUFFER {
-                                info!(
+                                let buf_len = buf.len();
+                                total_buffered.fetch_sub(buf_len, Ordering::Relaxed);
+                                buf.clear();
+                                warn!(
                                     "[READER] Session {} BUFFER OVERFLOW ({} > {}), closing",
                                     session_key,
-                                    buf.len(),
+                                    buf_len,
                                     MAX_STREAM_BUFFER
                                 );
                                 break;
@@ -524,12 +691,13 @@ impl RelayServer {
                                         }
                                         let packet_data: Vec<u8> =
                                             buf.drain(..packet_len).collect();
+                                        total_buffered.fetch_sub(packet_len, Ordering::Relaxed);
                                         let op = if packet_data.is_empty() {
                                             0
                                         } else {
                                             packet_data[0]
                                         };
-                                        info!(
+                                        debug!(
                                             "[READER] Session {} -> opcode=0x{:02x} ({}) total_packet={} bytes",
                                             session_key,
                                             op,
@@ -553,7 +721,7 @@ impl RelayServer {
                                         }
                                     }
                                     Ok(None) => {
-                                        info!(
+                                        debug!(
                                             "[READER] Session {} incomplete packet, waiting for more data (buf={} bytes)",
                                             session_key,
                                             buf.len()
@@ -576,7 +744,7 @@ impl RelayServer {
                             break;
                         }
                         Err(_) => {
-                            info!(
+                            warn!(
                                 "[READER] Session {} IDLE TIMEOUT ({}s, no data from client)",
                                 session_key,
                                 SESSION_IDLE_TIMEOUT.as_secs()
@@ -585,6 +753,10 @@ impl RelayServer {
                         }
                     }
                 }
+                // Release any remaining buffered bytes from the aggregate budget.
+                if !buf.is_empty() {
+                    total_buffered.fetch_sub(buf.len(), Ordering::Relaxed);
+                }
                 info!(
                     "[READER] Session {} reader task ended (authenticated={})",
                     session_key, authenticated
@@ -592,25 +764,27 @@ impl RelayServer {
             })
         };
 
-        // Wait for either task to finish, then clean up.
+        // Wait for either task to finish, then abort the other to avoid orphaned tasks.
         info!(
             "[SESSION] Session {} waiting for writer/reader tasks to finish...",
             session_key
         );
         tokio::select! {
-            _ = writer_task => {
-                info!("[SESSION] Session {} writer task finished first", session_key);
-            },
-            _ = reader_task => {
-                info!("[SESSION] Session {} reader task finished first", session_key);
-            },
+            _ = writer_task => {},
+            _ = reader_task => {},
         }
+        // Both tasks are now finished or about to be dropped. The JoinHandles
+        // go out of scope here, which is fine — we don't need to abort because
+        // the select! already resolved (one finished, the other was dropped).
         info!(
             "[SESSION] Session {} CLOSED (sessions_left={})",
             session_key,
             self.sessions.len().saturating_sub(1)
         );
         self.sessions.remove(&session_key);
+        self.auth_nonces.remove(&session_key);
+        self.auth_attempts.remove(&session_key);
+        self.key_exchange_store.remove(&session_key);
         self.tui.set_stats(self.sessions.len(), self.store.len());
         info!(
             "[SESSION] Session {} cleanup complete, remaining sessions={}",
@@ -631,36 +805,106 @@ impl RelayServer {
 
         match opcode {
             Opcode::Auth => {
-                // Auth: [0x01] [SHA-256(password) as lowercase hex UTF-8]
-                let password_hash = reader
+                // Auth: [0x01] [len-prefixed: raw password bytes] [32 raw bytes: HMAC-SHA-256]
+                // HMAC key = Argon2id(password) output bytes (32 bytes)
+                // HMAC message = server nonce (16 bytes)
+                let password_bytes = reader
                     .read_len_prefixed()
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
-                let password_hash_str = String::from_utf8(password_hash)
+                let password = String::from_utf8(password_bytes)
                     .map_err(|_| anyhow::anyhow!("invalid UTF-8 in password"))?;
 
-                info!(
-                    "[AUTH] Session {} got password_hash='{}' ({} hex chars)",
-                    session_key,
-                    &password_hash_str[..8],
-                    password_hash_str.len()
-                );
-                info!(
-                    "[AUTH] Session {} stored hash='{}' ({} hex chars)",
-                    session_key,
-                    &self.password_hash[..8],
-                    self.password_hash.len()
-                );
+                // Check brute-force limit.
+                let attempts = self.auth_attempts.entry(session_key).or_insert_with(|| AtomicU32::new(0));
+                if attempts.load(Ordering::Relaxed) >= MAX_AUTH_ATTEMPTS {
+                    warn!("[AUTH] Session {} brute-force limit reached ({} attempts), closing",
+                        session_key, MAX_AUTH_ATTEMPTS);
+                    return Err(anyhow::anyhow!("brute-force limit exceeded"));
+                }
+                attempts.fetch_add(1, Ordering::Relaxed);
 
-                use subtle::ConstantTimeEq;
-                let ok = password_hash_str
-                    .as_bytes()
-                    .ct_eq(self.password_hash.as_bytes())
-                    .into();
-                info!("[AUTH] Session {} passwords MATCH={}", session_key, ok);
+                // Verify password against stored Argon2 hash.
+                let hash_ok = crate::config::argon2_verify(&password, &self.password_hash);
+                if !hash_ok {
+                    warn!("[AUTH] Session {} password verification failed", session_key);
+                }
+
+                // Derive HMAC key from Argon2 output for challenge-response.
+                let argon2_key = if hash_ok {
+                    use argon2::password_hash::PasswordHash;
+                    use argon2::{Argon2, Algorithm, Version};
+                    let parsed = PasswordHash::new(&self.password_hash)
+                        .map_err(|e| anyhow::anyhow!("failed to parse stored hash: {}", e))?;
+                    // Re-compute Argon2 with the SAME params stored in the hash.
+                    if let Some(salt) = parsed.salt {
+                        let mut raw_salt_buf = [0u8; 64];
+                        let raw_salt = salt.decode_b64(&mut raw_salt_buf)
+                            .map_err(|e| anyhow::anyhow!("failed to decode Argon2 salt: {}", e))?;
+                        let params = argon2::Params::try_from(&parsed)
+                            .map_err(|e| anyhow::anyhow!("failed to parse Argon2 params: {}", e))?;
+                        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+                        let mut output = [0u8; 32];
+                        argon2.hash_password_into(password.as_bytes(), raw_salt, &mut output)
+                            .map_err(|e| anyhow::anyhow!("Argon2 key derivation failed: {}", e))?;
+                        Some(output.to_vec())
+                    } else {
+                        warn!("[AUTH] Session {} Argon2 hash missing salt", session_key);
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // Verify challenge-response using HMAC-SHA-256.
+                let nonce_entry = self.auth_nonces.get(&session_key);
+                let nonce_valid = match nonce_entry {
+                    Some(entry) => {
+                        let (nonce, created_at) = entry.value();
+                        let age = std::time::Instant::now().duration_since(*created_at);
+                        if age > NONCE_MAX_AGE {
+                            warn!("[AUTH] Session {} challenge nonce expired", session_key);
+                            false
+                        } else if reader.remaining().is_empty() {
+                            warn!("[AUTH] Session {} missing challenge response", session_key);
+                            false
+                        } else {
+                            // Fixed 32-byte HMAC (no length prefix).
+                            let client_response = reader
+                                .read_bytes(32)
+                                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+                            if let Some(ref key) = argon2_key {
+                                // Verify HMAC-SHA-256(key=Argon2_output, message=nonce).
+                                use hmac::{Hmac, Mac};
+                                use sha2::Sha256;
+                                type HmacSha256 = Hmac<Sha256>;
+                                let mut mac = HmacSha256::new_from_slice(key)
+                                    .map_err(|e| anyhow::anyhow!("HMAC key error: {}", e))?;
+                                mac.update(nonce);
+                                let ok: bool = mac.verify_slice(&client_response).is_ok();
+                                if !ok {
+                                    warn!("[AUTH] Session {} HMAC challenge response mismatch", session_key);
+                                }
+                                ok
+                            } else {
+                                // Password was wrong — HMAC check is irrelevant.
+                                false
+                            }
+                        }
+                    }
+                    None => {
+                        warn!("[AUTH] Session {} no challenge nonce found", session_key);
+                        false
+                    }
+                };
+
+                let ok = hash_ok && nonce_valid;
+                debug!("[AUTH] Session {} hash_match={} challenge_valid={} → {}",
+                    session_key, hash_ok, nonce_valid, ok);
 
                 let response = ServerPacketEncoder::auth_result(
                     ok,
-                    if ok { None } else { Some("Invalid password") },
+                    if ok { None } else { Some("Invalid password or challenge") },
                 );
                 info!(
                     "[AUTH] Session {} sending AuthResult: success={} packet_len={}",
@@ -676,13 +920,40 @@ impl RelayServer {
 
                 *authenticated = ok;
                 if !ok {
-                    info!("[AUTH] Session {} auth FAILED -> closing", session_key);
+                    // Slow down brute-force attempts
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    info!("[AUTH] Session {} auth FAILED -> closing (authenticated was false)", session_key);
                     return Err(anyhow::anyhow!("authentication failed"));
                 }
                 info!(
                     "[AUTH] Session {} auth SUCCESS -> authenticated=true",
                     session_key
                 );
+
+                // Replay stored key exchanges from ALL OTHER sessions so this
+                // newly-authenticated client can send messages to peers that
+                // connected before it.
+                let mut replayed = 0u32;
+                for entry in self.key_exchange_store.iter() {
+                    let src = *entry.key();
+                    if src == session_key {
+                        continue;
+                    }
+                    for packet in entry.value() {
+                        if let Err(e) = direct_tx.send(packet.clone()).await {
+                            warn!("[AUTH] Session {} failed to replay keyex from session {}: {}", session_key, src, e);
+                        } else {
+                            replayed += 1;
+                        }
+                    }
+                }
+                if replayed > 0 {
+                    info!(
+                        "[AUTH] Session {} replayed {} stored key exchanges from peers",
+                        session_key, replayed
+                    );
+                }
+
                 Ok(())
             }
             Opcode::Sync => {
@@ -691,7 +962,7 @@ impl RelayServer {
                     return Err(anyhow::anyhow!("not authenticated"));
                 }
                 let last_seen_id = reader.read_u64().map_err(|e| anyhow::anyhow!("{}", e))?;
-                info!(
+                debug!(
                     "[SYNC] Session {} sync request last_seen_id={}",
                     session_key, last_seen_id
                 );
@@ -701,7 +972,7 @@ impl RelayServer {
                     .into_iter()
                     .map(|m| (m.id, m.timestamp, m.payload))
                     .collect();
-                info!(
+                debug!(
                     "[SYNC] Session {} returning {} messages",
                     session_key,
                     messages.len()
@@ -722,14 +993,14 @@ impl RelayServer {
                 let payload = reader
                     .read_len_prefixed()
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
-                info!(
+                debug!(
                     "[DATA] Session {} data payload={} bytes",
                     session_key,
                     payload.len()
                 );
 
                 if payload.len() > MAX_PAYLOAD_BYTES {
-                    info!(
+                    warn!(
                         "[DATA] Session {} OVERSIZED payload {} > {}, dropping",
                         session_key,
                         payload.len(),
@@ -739,7 +1010,7 @@ impl RelayServer {
                 }
 
                 let stored = self.store.push(payload.clone());
-                info!(
+                debug!(
                     "[DATA] Session {} stored id={}, broadcasting",
                     session_key, stored.id
                 );
@@ -750,17 +1021,21 @@ impl RelayServer {
                 };
                 let subs = self.data_tx.send(relayed);
                 match subs {
-                    Ok(n) => info!(
+                    Ok(n) => debug!(
                         "[DATA] Session {} broadcast OK to {} receivers",
                         session_key, n
                     ),
-                    Err(_) => info!("[DATA] Session {} broadcast: no receivers", session_key),
+                    Err(_) => debug!("[DATA] Session {} broadcast: no receivers", session_key),
                 }
                 Ok(())
             }
             Opcode::Heartbeat => {
+                if !*authenticated {
+                    info!("[HEARTBEAT] Session {} REJECTED: not authenticated", session_key);
+                    return Err(anyhow::anyhow!("not authenticated"));
+                }
                 let client_ts = reader.read_u64().map_err(|e| anyhow::anyhow!("{}", e))?;
-                info!(
+                debug!(
                     "[HEARTBEAT] Session {} client_ts={}",
                     session_key, client_ts
                 );
@@ -782,7 +1057,7 @@ impl RelayServer {
                 let public_key = reader
                     .read_len_prefixed()
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
-                info!(
+                debug!(
                     "[KEYEX] Session {} public_key={} bytes",
                     session_key,
                     public_key.len()
@@ -791,7 +1066,7 @@ impl RelayServer {
                 let _ = self
                     .keyexchange_tx
                     .send((session_key, encode_key_exchange(&public_key)));
-                info!("[KEYEX] Session {} relayed to all peers", session_key);
+                debug!("[KEYEX] Session {} relayed to all peers", session_key);
                 Ok(())
             }
             Opcode::KeyExchangeKem | Opcode::KeyExchangeDsa => {
@@ -805,20 +1080,26 @@ impl RelayServer {
                 let public_key = reader
                     .read_len_prefixed()
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
-                info!(
+                debug!(
                     "[KEYEX] Session {} {} public_key={} bytes",
                     session_key,
                     opcode_name(opcode as u8),
                     public_key.len()
                 );
 
+                let packet = encode_key_exchange_tagged(&public_key, opcode);
                 let _ = self
                     .keyexchange_tx
-                    .send((session_key, encode_key_exchange(&public_key)));
-                info!("[KEYEX] Session {} relayed to all peers", session_key);
+                    .send((session_key, packet.clone()));
+                // Store the key exchange packet so newly-connecting peers can receive it.
+                self.key_exchange_store
+                    .entry(session_key)
+                    .or_default()
+                    .push(packet);
+                debug!("[KEYEX] Session {} relayed as 0x{:02x} to all peers", session_key, opcode as u8);
                 Ok(())
             }
-            Opcode::AuthResult | Opcode::SyncResponse | Opcode::NewCertHash => {
+            Opcode::AuthResult | Opcode::SyncResponse | Opcode::NewCertHash | Opcode::AuthChallenge => {
                 info!(
                     "[IGNORE] Session {} received server->client opcode {:?}, ignoring",
                     session_key, opcode
@@ -829,14 +1110,29 @@ impl RelayServer {
     }
 
     fn spawn_housekeeping(self: Arc<Self>) {
+        let this = self.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(HOUSEKEEP_INTERVAL);
+            let mut ip_prune_tick = tokio::time::interval(IP_PRUNE_INTERVAL);
             loop {
-                tick.tick().await;
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    _ = ip_prune_tick.tick() => {
+                        this.prune_rate_limiter().await;
+                        // Prune expired auth nonces.
+                        let now = Instant::now();
+                        this.auth_nonces.retain(|_, (_, created_at)| {
+                            now.duration_since(*created_at) < NONCE_MAX_AGE
+                        });
+                        // Prune orphaned auth_attempts (no matching nonce).
+                        this.auth_attempts.retain(|k, _| this.auth_nonces.contains_key(k));
+                        continue;
+                    }
+                }
 
                 // Rotate certificate if needed and refresh TUI.
                 let rotated = {
-                    let mut cm = self.cert_manager.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut cm = self.cert_manager.lock().await;
                     let r = cm.maybe_rotate();
                     cm.prune_previous();
                     r
@@ -847,8 +1143,8 @@ impl RelayServer {
                     // it without recreating the Endpoint. Trust continuity for
                     // clients still pinned to the old fingerprint is handled at
                     // the application layer via the `NewCertHash` (0x07) broadcast.
-                    {
-                        let cm = self.cert_manager.lock().unwrap_or_else(|e| e.into_inner());
+                    let (cert, has_previous) = {
+                        let cm = self.cert_manager.lock().await;
                         let provider = Arc::new(crate::cert::default_crypto_provider());
                         match cm.current().certified_key(&provider) {
                             Ok(key) => self.cert_resolver.update(key),
@@ -856,23 +1152,12 @@ impl RelayServer {
                                 warn!("Failed to rebuild certified key after rotation: {}", e)
                             }
                         }
-                    }
-
-                    let cert = self
-                        .cert_manager
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .current()
-                        .clone();
-                    // During the overlap window the previous cert is still valid;
-                    // surface that in the TUI.
+                        let cert = cm.current().clone();
+                        let has_previous = cm.previous().is_some();
+                        (cert, has_previous)
+                    };
                     let mut view = crate::tui::CertView::from_cert(&cert);
-                    view.rotating = self
-                        .cert_manager
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .previous()
-                        .is_some();
+                    view.rotating = has_previous;
                     self.tui.set_cert(view);
                     info!(
                         "Certificate rotated; new fingerprint {}",
@@ -888,9 +1173,12 @@ impl RelayServer {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    let _ = self
+                    if let Err(e) = self
                         .control_tx
-                        .send(ServerPacketEncoder::new_cert_hash(&hash_bytes, expires_at));
+                        .send(ServerPacketEncoder::new_cert_hash(&hash_bytes, expires_at))
+                    {
+                        warn!("Failed to broadcast NewCertHash: {}", e);
+                    }
                     info!("Applied rotated certificate to live TLS resolver");
                 }
 
@@ -922,7 +1210,7 @@ fn try_read_packet(buf: &[u8]) -> Result<Option<usize>, ()> {
     // protocol violation (and 0x04 in particular would otherwise make the
     // length parser iterate up to `count` times — a CPU-DoS, see C1).
     let min_len = match opcode {
-        0x01 => 1 + 4,       // Auth: opcode + len prefix (min)
+        0x01 => 1 + 4 + 32,  // Auth: opcode + len prefix + fixed 32-byte HMAC
         0x03 => 1 + 8,       // Sync: opcode + u64
         0x05 => 1 + 4,       // Data: opcode + len prefix
         0x06 => 1 + 8,       // Heartbeat: opcode + u64
@@ -935,10 +1223,23 @@ fn try_read_packet(buf: &[u8]) -> Result<Option<usize>, ()> {
         return Ok(None);
     }
 
-    // For length-prefixed packets, read the length field. Only client→server
-    // opcodes remain here (server→client ones already returned Err above).
+    // For length-prefixed packets, read the length field. Auth (0x01) has a
+    // fixed 32-byte HMAC suffix after the password payload.
     let len = match opcode {
-        0x01 | 0x05 | 0x08 | 0x09 | 0x0A => {
+        0x01 => {
+            // Auth: [0x01] [u32: pwd_len] [pwd_bytes] [32 raw bytes: HMAC]
+            if buf.len() < 5 {
+                return Ok(None);
+            }
+            let pwd_len = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+            // Full packet: opcode(1) + len(4) + pwd_len + HMAC(32)
+            let total = 1 + 4 + pwd_len + 32;
+            if total > MAX_PACKET_LEN {
+                return Err(());
+            }
+            return Ok(Some(total));
+        }
+        0x05 | 0x08 | 0x09 | 0x0A => {
             if buf.len() < 5 {
                 return Ok(None);
             }
