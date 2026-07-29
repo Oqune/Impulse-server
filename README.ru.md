@@ -7,10 +7,14 @@
 [![Rust](https://img.shields.io/badge/Rust-1.85%2B-darkblue?logo=rust)](https://www.rust-lang.org)
 [![WebTransport](https://img.shields.io/badge/Transport-WebTransport%20%2F%20QUIC-green)](https://w3c.github.io/webtransport/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/Oqune/Impulse-server/actions/workflows/ci.yml/badge.svg)](https://github.com/Oqune/Impulse-server/actions/workflows/ci.yml)
+[![CI](https://github.com/Oqune/Impulse-server/actions/workflows/server-build.yml/badge.svg)](https://github.com/Oqune/Impulse-server/actions/workflows/server-build.yml)
+[![Release](https://img.shields.io/github/v/release/Oqune/Impulse-server?label=latest)](https://github.com/Oqune/Impulse-server/releases)
 
 Сервер безопасного **эфемерного** мессенджера на **WebTransport (QUIC)** с
 **TOFU** (trust-on-first-use) и парольной аутентификацией.
+
+> **Клиент:** [Oqune/Impulse-client](https://github.com/Oqune/Impulse-client) —
+> Android-клиент с постквантовым E2EE для этого сервера.
 
 </div>
 
@@ -27,10 +31,12 @@ Impulse — это relay-сервер для end-to-end-encrypted мессенд
 
 - **Транспорт:** только WebTransport поверх QUIC (`wtransport` 0.7). TLS 1.3
   обязателен; старый WSS-транспорт удалён.
-- **Бинарный протокол:** length-prefixed бинарные фреймы с опкодами `0x01`–`0x08`
+- **Бинарный протокол:** length-prefixed бинарные фреймы с опкодами `0x01`–`0x0C`
   (little-endian), не JSON.
-- **Аутентификация:** клиенты обязаны отправить `Auth` с паролем; сервер проверяет
-  SHA-256 хэш в constant time.
+- **Аутентификация:** сервер отправляет `AuthChallenge (0x0B)` с 16-байтным nonce
+  и Argon2id-солью; клиент вычисляет ключ через Argon2id, HMAC-SHA-256(key, nonce)
+  и отправляет `Auth (0x01)` с паролем и HMAC. Сервер проверяет HMAC в constant time
+  и хранит пароли как Argon2id-хэши.
 - **TLS / Сертификаты:** самоподписанные **ECDSA P-256** сертификаты, срок действия
   **14 дней**, автоматическая ротация с **2-дневным окном перекрытия**. PEM-материал
   сохраняется в `cert_dir` (путь относительно исполняемого файла, права `0600` на
@@ -41,8 +47,10 @@ Impulse — это relay-сервер для end-to-end-encrypted мессенд
   ротации новый отпечаток рассылается через `NewCertHash` (0x07).
 - **Хранилище:** in-RAM ring buffer, сообщения истекают через 72 ч (`TTL`),
   ограничено количеством (`10_000`) и размером полезной нагрузки (`1 MB`).
+  KeyExchange-данные кэшируются per-сессия (DashMap) и replay'ятся новым клиентам.
 - **Relay:** broadcast всем активным сессиям; поздние подключающиеся догоняют
-  через `Sync { last_seen_id }`. Один `Sync` возвращает не более `500` сообщений.
+  через `Sync { last_seen_id }`. Один `Sync` возвращает не более `2000` сообщений.
+  Ключевые обмены также ретранслируются всем подключённым клиентам.
 - **Администрирование:** **TUI** с двухколоночным layout:
   - **Левая колонка** (Info + QR + Certificate): адрес прослушивания, транспорт
     (`WebTransport/QUIC TLS1.3 (h3)`), версия crate, количество SAN, текущие
@@ -62,7 +70,7 @@ cargo build --release
 ./target/release/Impulse-server --config config.toml
 # или через CLI-флаги (переопределяют конфиг-файл):
 ./target/release/Impulse-server --port 4433 --cert-dir cert_data \
-    --password-hash $(printf 'yourpassword' | sha256sum | cut -d' ' -f1)
+    --password-hash "$(./target/release/Impulse-server --hash-password yourpassword)"
 ```
 
 | Флаг | Короткий | Описание | По умолчанию |
@@ -71,11 +79,11 @@ cargo build --release
 | `--port` | `-p` | Порт WebTransport (QUIC) | `4433` |
 | `--cert-dir` | | Каталог для генерируемых сертификата/ключа | `cert_data` |
 | `--san` | | Дополнительный SAN (DNS или IP) для самоподписанного сертификата (повторяемый) | _нет_ |
-| `--password-hash` | | SHA-256 hex пароля клиента (обязателен) | _нет_ |
+| `--password-hash` | | Argon2id хэш пароля клиента (обязателен) | _нет_ |
 | `--config` | | Путь к TOML-конфигу | `./config.toml` |
 
 `password_hash` **обязателен** — небезопасного значения по умолчанию нет.
-Сгенерируйте: `printf 'pw' | sha256sum` или встроенным хелпером:
+Сгенерируйте встроенным хелпером:
 
 ```bash
 ./target/release/Impulse-server --hash-password yourpassword
@@ -199,18 +207,20 @@ Impulse-server написан на переносимом Rust (edition 2024) и
 
 | Opcode | Напр. | Имя | Поля |
 |--------|-------|-----|------|
-| `0x01` | C→S | Auth | `len`-prefixed пароль (UTF-8) |
+| `0x01` | C→S | Auth | `u32 LE pwd_len`, `pwd_len` байт пароля (UTF-8), 32 сырых байта HMAC-SHA-256 |
 | `0x02` | S→C | AuthResult | `u8` статус (`0`=ok, `1`=fail) + опциональный `len`-prefixed текст |
 | `0x03` | C→S | Sync | `u64` last_seen_id |
 | `0x04` | S→C | SyncResponse | `u32` count, затем для каждого сообщения: `u64 id`, `u64 ts`, `len`-prefixed payload |
 | `0x05` | C→S / S→C | Data | C→S: `len`-prefixed payload. S→C: `u64 id`, `u64 ts`, `len`-prefixed payload |
 | `0x06` | обе | Heartbeat | `u64` client_timestamp (эхо-ответ) |
 | `0x07` | S→C | NewCertHash | ровно 32 сырых байта SHA-256 + `u64` unix expiry |
-| `0x08` | C→S / S→C | KeyExchange | `len`-prefixed публичный ключ (ретранслируется другим клиентам) |
+| `0x0B` | S→C | AuthChallenge | 16 байт nonce + `u32 LE salt_len`, `salt_len` байт B64 Argon2id соли |
+| `0x0C` | C→S / S→C | KeyExchangeKemDsa | `len`-prefixed комбинированный ML-KEM + ML-DSA-65 публичные ключи (ретранслируется атомарно) |
 
 Неизвестные/невалидные опкоды от клиента закрывают соединение. Простаивающие
-стримы закрываются через 300 с. Сессии лимитированы 1024; оверсайзные полезные
-нагрузки (>1 MB) отбрасываются. Один `Sync` возвращает не более 500 сообщений.
+стримы закрываются через 300 с. Сессии лимитированы 1024; агрегатный буфер
+ограничен 512 МБ (`AtomicUsize`), идентификаторы сессий уникальны
+(`AtomicU64` счётчик). Оверсайзные полезные нагрузки (>1 MB) отбрасываются. Один `Sync` возвращает не более 2000 сообщений.
 Wire-parser валидирует заявленную длину пакета против того же лимита в 1 MB
 до любой аллокации, предотвращая CPU-DoS через inflation length-префиксов (C1).
 
@@ -221,10 +231,13 @@ Wire-parser валидирует заявленную длину пакета п
   (2 дн. перекрытие); новый сертификат применяется к **рабочему** TLS resolver'у
   (без рестарта) и анонсируется через `NewCertHash`.
 - TOFU pinning отпечатка через QR-код + контрольный пакет `NewCertHash`.
-- Гибридный постквантовый обмен ключами (X25519Kyber768) через `aws-lc-rs`.
+- Гибридный постквантовый обмен ключами (X25519Kyber768, ML-KEM, ML-DSA-65) через `aws-lc-rs`.
 - Эфемерное RAM-only хранилище, TTL 72 ч, ограниченный ring buffer и размер
   полезной нагрузки.
-- Constant-time сравнение хэша пароля.
+- Argon2id для хэширования паролей с constant-time сравнением HMAC.
+- Replay-защита ключевых обменов: сервер кэширует KeyExchange по сессиям
+  (DashMap) и replay'ит их вновь подключившимся клиентам.
+- Blind relay — сервер **никогда не расшифровывает** полезные нагрузки сообщений.
 - Файл приватного ключа ограничен `0600` на Unix; эксклюзивный DACL на Windows.
 - Per-IP rate limiting (10 соединений / 10 сек) и лимит сессий для защиты от DoS.
 - Неактивные сессии закрываются через 300 с для предотвращения утечек ресурсов.
@@ -242,7 +255,7 @@ Wire-parser валидирует заявленную длину пакета п
 src/
   cert.rs      — генерация ECDSA P-256 сертификатов, ротация, SHA-256 TOFU отпечаток, FS персист
   storage.rs   — эфемерный in-RAM лог сообщений (TTL 72ч, sequence ids)
-  protocol.rs  — бинарные wire-фреймы (опкоды 0x01–0x08)
+  protocol.rs  — бинарные wire-фреймы (опкоды 0x01–0x0C)
   server.rs    — WebTransport эндпойнт, обработка сессий, broadcast relay
   tui.rs       — терминальный UI: Server Info header, лог-стрим, TOFU QR / fingerprint панель
   logging.rs   — мост tracing → TUI / rolling-файл

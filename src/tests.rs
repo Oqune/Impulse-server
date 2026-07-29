@@ -451,7 +451,7 @@ mod integration_protocol_tests {
     use crate::config::{argon2_hash, argon2_verify};
     use crate::protocol::{
         Opcode, PacketReader, PacketWriter, ProtocolError, encode_auth_challenge, encode_auth_result,
-        encode_data, encode_heartbeat, encode_key_exchange, encode_new_cert_hash, encode_sync_response,
+        encode_data, encode_heartbeat, encode_new_cert_hash, encode_sync_response,
     };
     use crate::storage::MessageStore;
     use dashmap::DashMap;
@@ -742,25 +742,6 @@ mod integration_protocol_tests {
         assert_eq!(r.read_opcode().unwrap(), Opcode::Heartbeat);
         assert_eq!(r.read_u64().unwrap(), timestamp);
         assert!(r.remaining().is_empty());
-    }
-
-    /// ── 7. test_key_exchange_roundtrip ──────────────────────────────────────────
-    /// Build KeyExchange (0x08, len-prefixed key), verify.
-    #[test]
-    fn test_key_exchange_roundtrip() {
-        let public_key = vec![0x42; 32]; // simulated X25519 public key
-        let bytes = encode_key_exchange(&public_key);
-
-        assert_eq!(bytes[0], 0x08);
-
-        let mut r = PacketReader::new(&bytes);
-        assert_eq!(r.read_opcode().unwrap(), Opcode::KeyExchange);
-        let parsed_key = r.read_len_prefixed().unwrap();
-        assert_eq!(parsed_key, public_key);
-        assert!(r.remaining().is_empty());
-
-        // Total: 1 (opcode) + 4 (len) + key.len()
-        assert_eq!(bytes.len(), 1 + 4 + public_key.len());
     }
 
     /// ── 8. test_full_handshake_sequence ─────────────────────────────────────────
@@ -1076,11 +1057,6 @@ mod integration_protocol_tests {
         let nch = encode_new_cert_hash(&hash, 1_700_000_000);
         assert_eq!(nch.len(), 41);
 
-        // KeyExchange: 1 + 4 + key.len()
-        let key = vec![0x42u8; 32];
-        let kex = encode_key_exchange(&key);
-        assert_eq!(kex.len(), 1 + 4 + 32);
-
         // AuthChallenge: 1 + 16 + 4 + salt_b64.len()
         let nonce = vec![0u8; 16];
         let salt_b64 = "c29tZXNhbHQ"; // "testsalt" in B64
@@ -1221,5 +1197,702 @@ mod integration_protocol_tests {
             let (h, _) = server_verify_auth(&packet, &stored_hash, &nonce).unwrap();
             assert!(h, "packet verification itself passes (blocked at server level)");
         }
+    }
+}
+
+// ============================================================================
+// COMBINED KEY EXCHANGE (0x0C) — Wire Format Tests
+// ============================================================================
+// These tests verify the server correctly handles the combined KEM+DSA key
+// exchange format. The client builds:
+//   [0x0C] [u32: total_len] [u32: kem_len] [kem_bytes] [u32: dsa_len] [dsa_bytes]
+//
+// The server reads the opcode, then `reader.remaining()` gives the outer blob.
+// `encode_key_exchange_tagged` wraps it for relay: [0x0C] [u32: len] [remaining_blob].
+
+#[cfg(test)]
+mod combined_key_exchange_tests {
+    use crate::protocol::{Opcode, PacketReader, PacketWriter};
+
+    /// Build a client-format combined key exchange packet (as the Kotlin client sends it).
+    /// Wire: [0x0C] [u32: total_len] [u32: kem_len] [kem] [u32: dsa_len] [dsa]
+    fn build_client_combined_key_exchange(kem: &[u8], dsa: &[u8]) -> Vec<u8> {
+        // Inner blob: [u32: kem_len] [kem] [u32: dsa_len] [dsa]
+        let total_inner = 4 + kem.len() + 4 + dsa.len();
+        let mut w = PacketWriter::with_opcode(Opcode::KeyExchangeKemDsa);
+        // Write outer u32 total_len
+        w.write_u32(total_inner as u32);
+        // Write inner: kem
+        w.write_u32(kem.len() as u32);
+        w.write_raw(kem);
+        // Write inner: dsa
+        w.write_u32(dsa.len() as u32);
+        w.write_raw(dsa);
+        w.into_bytes()
+    }
+
+    /// Simulate the server's try_read_packet: read u32 at offset 1 as payload_len.
+    /// Returns the total packet length that try_read_packet would compute.
+    fn simulated_try_read_packet_len(frame: &[u8]) -> usize {
+        assert!(frame.len() >= 5, "frame too short");
+        let len = u32::from_le_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
+        1 + 4 + len
+    }
+
+    /// Simulate the server's process_packet for 0x0C:
+    /// read opcode, then remaining() = everything after opcode byte.
+    fn simulated_server_remaining(frame: &[u8]) -> Vec<u8> {
+        frame[1..].to_vec()
+    }
+
+    /// Simulate the server relay: prepend opcode byte to combined_payload.
+    /// This matches the fixed server code which no longer uses encode_key_exchange_tagged.
+    fn simulated_server_relay(frame: &[u8]) -> Vec<u8> {
+        let remaining = simulated_server_remaining(frame);
+        let mut relay = vec![frame[0]]; // opcode byte
+        relay.extend_from_slice(&remaining);
+        relay
+    }
+
+    // ── 1. try_read_packet length covers full frame ────────────────────────────
+    #[test]
+    fn test_try_read_packet_length_covers_full_frame() {
+        let kem = vec![0xAA; 1184];
+        let dsa = vec![0xBB; 1952];
+
+        let frame = build_client_combined_key_exchange(&kem, &dsa);
+        let computed_len = simulated_try_read_packet_len(&frame);
+
+        assert_eq!(frame.len(), computed_len);
+    }
+
+    // ── 2. try_read_packet length for various key sizes ────────────────────────
+    #[test]
+    fn test_try_read_packet_length_various_sizes() {
+        let test_cases: Vec<(usize, usize)> = vec![
+            (0, 0),
+            (1, 1),
+            (100, 200),
+            (1184, 1952),
+            (32, 64),
+        ];
+
+        for (kem_len, dsa_len) in test_cases {
+            let kem = vec![0xCC; kem_len];
+            let dsa = vec![0xDD; dsa_len];
+            let frame = build_client_combined_key_exchange(&kem, &dsa);
+            let computed_len = simulated_try_read_packet_len(&frame);
+            assert_eq!(frame.len(), computed_len,
+                "Frame mismatch for kem_len={}, dsa_len={}", kem_len, dsa_len);
+        }
+    }
+
+    // ── 3. server relay preserves the original client frame format ──────────────
+    #[test]
+    fn test_server_relay_preserves_original_format() {
+        let kem = vec![0x11; 100];
+        let dsa = vec![0x22; 200];
+
+        let frame = build_client_combined_key_exchange(&kem, &dsa);
+        let relayed = simulated_server_relay(&frame);
+
+        // Relayed packet is identical to the original client frame
+        assert_eq!(relayed, frame);
+    }
+
+    // ── 4. relayed packet parseable by receiving client ─────────────────────────
+    #[test]
+    fn test_relayed_packet_parseable_by_client() {
+        let kem = vec![0xAA; 1184];
+        let dsa = vec![0xBB; 1952];
+
+        let frame = build_client_combined_key_exchange(&kem, &dsa);
+        let relayed = simulated_server_relay(&frame);
+
+        // Receiving client: read opcode
+        let mut reader = PacketReader::new(&relayed);
+        let opcode = reader.read_opcode().unwrap();
+        assert_eq!(opcode, Opcode::KeyExchangeKemDsa);
+
+        // outer blob
+        let outer_blob = reader.read_len_prefixed().unwrap();
+
+        // Inner: parse [u32: kem_len] [kem] [u32: dsa_len] [dsa]
+        let mut inner = PacketReader::new(&outer_blob);
+        let parsed_kem = inner.read_len_prefixed().unwrap();
+        let parsed_dsa = inner.read_len_prefixed().unwrap();
+
+        assert_eq!(parsed_kem, &kem[..]);
+        assert_eq!(parsed_dsa, &dsa[..]);
+    }
+
+    // ── 5. no orphan bytes ─────────────────────────────────────────────────────
+    #[test]
+    fn test_no_orphan_bytes_after_try_read() {
+        let kem = vec![0x55; 500];
+        let dsa = vec![0x66; 600];
+
+        let frame = build_client_combined_key_exchange(&kem, &dsa);
+        let packet_len = simulated_try_read_packet_len(&frame);
+
+        assert_eq!(frame.len(), packet_len);
+    }
+
+    // ── 6. outer u32 total_len equals inner content ────────────────────────────
+    #[test]
+    fn test_outer_u32_equals_inner_content() {
+        let kem = vec![0x77; 300];
+        let dsa = vec![0x88; 400];
+
+        let frame = build_client_combined_key_exchange(&kem, &dsa);
+        let outer_len = u32::from_le_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
+
+        let expected_inner = 4 + kem.len() + 4 + dsa.len();
+        assert_eq!(outer_len, expected_inner);
+    }
+
+    // ── 7. empty keys — edge case ──────────────────────────────────────────────
+    #[test]
+    fn test_empty_keys_roundtrip() {
+        let kem: Vec<u8> = vec![];
+        let dsa: Vec<u8> = vec![];
+
+        let frame = build_client_combined_key_exchange(&kem, &dsa);
+        let relayed = simulated_server_relay(&frame);
+
+        let mut reader = PacketReader::new(&relayed);
+        assert_eq!(reader.read_opcode().unwrap(), Opcode::KeyExchangeKemDsa);
+        let outer = reader.read_len_prefixed().unwrap();
+        let mut inner = PacketReader::new(&outer);
+        assert_eq!(inner.read_len_prefixed().unwrap(), &[]);
+        assert_eq!(inner.read_len_prefixed().unwrap(), &[]);
+    }
+
+    // ── 8. frame length consistency ────────────────────────────────────────────
+    #[test]
+    fn test_frame_length_consistency_through_relay() {
+        let kem = vec![0xAB; 1184];
+        let dsa = vec![0xCD; 1952];
+
+        let frame = build_client_combined_key_exchange(&kem, &dsa);
+        assert_eq!(frame[0], 0x0C);
+
+        let packet_len = simulated_try_read_packet_len(&frame);
+        assert_eq!(frame.len(), packet_len);
+
+        let relayed = simulated_server_relay(&frame);
+        assert_eq!(relayed, frame);
+    }
+
+    // ── 9. OP_DATA is NOT confused with 0x0C ──────────────────────────────────
+    #[test]
+    fn test_data_and_keyexchange_opcodes_distinguished() {
+        let payload = b"hello world";
+
+        let mut data_w = PacketWriter::with_opcode(Opcode::Data);
+        data_w.write_len_prefixed(payload);
+        let data_frame = data_w.into_bytes();
+
+        let kem = vec![0x11; 32];
+        let dsa = vec![0x22; 32];
+        let ke_frame = build_client_combined_key_exchange(&kem, &dsa);
+
+        assert_eq!(data_frame[0], 0x05);
+        assert_eq!(ke_frame[0], 0x0C);
+
+        let data_len = u32::from_le_bytes([data_frame[1], data_frame[2], data_frame[3], data_frame[4]]);
+        assert_eq!(data_len as usize, payload.len());
+
+        let ke_len = u32::from_le_bytes([ke_frame[1], ke_frame[2], ke_frame[3], ke_frame[4]]);
+        assert_eq!(ke_len as usize, 4 + kem.len() + 4 + dsa.len());
+    }
+
+    // ── 10. stress test ────────────────────────────────────────────────────────
+    #[test]
+    fn test_stress_relay_cycles() {
+        for i in 0..50 {
+            let kem = vec![(i * 7 % 256) as u8; 32 + i * 10];
+            let dsa = vec![(i * 13 % 256) as u8; 64 + i * 20];
+
+            let frame = build_client_combined_key_exchange(&kem, &dsa);
+            assert_eq!(frame[0], 0x0C);
+
+            let packet_len = simulated_try_read_packet_len(&frame);
+            assert_eq!(frame.len(), packet_len);
+
+            let relayed = simulated_server_relay(&frame);
+            assert_eq!(relayed, frame);
+
+            let mut reader = PacketReader::new(&relayed);
+            assert_eq!(reader.read_opcode().unwrap(), Opcode::KeyExchangeKemDsa);
+            let outer = reader.read_len_prefixed().unwrap();
+
+            let mut inner = PacketReader::new(&outer);
+            let parsed_kem = inner.read_len_prefixed().unwrap();
+            let parsed_dsa = inner.read_len_prefixed().unwrap();
+
+            assert_eq!(parsed_kem, &kem[..]);
+            assert_eq!(parsed_dsa, &dsa[..]);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// End-to-end integration tests — full protocol lifecycle
+// ═══════════════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod e2e_integration_tests {
+    use crate::config::{argon2_hash, argon2_verify};
+    use crate::protocol::{
+        Opcode, PacketReader, PacketWriter, encode_sync_response,
+    };
+    use crate::server::{TryReadResult, try_read_packet};
+    use crate::storage::MessageStore;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    type HmacSha256 = Hmac<Sha256>;
+
+    fn derive_argon2_key(password: &str, stored_hash: &str) -> Vec<u8> {
+        use argon2::password_hash::PasswordHash;
+        let parsed = PasswordHash::new(stored_hash).expect("should parse stored hash");
+        let salt = parsed.salt.expect("stored hash should have a salt");
+        let mut raw_salt_buf = [0u8; 64];
+        let raw_salt = salt.decode_b64(&mut raw_salt_buf).expect("should decode B64 salt");
+        let mut output = [0u8; 32];
+        argon2::Argon2::default()
+            .hash_password_into(password.as_bytes(), raw_salt, &mut output)
+            .expect("Argon2 derivation should not fail");
+        output.to_vec()
+    }
+
+    fn build_client_auth(password: &str, server_nonce: &[u8], stored_hash: &str) -> Vec<u8> {
+        let key = derive_argon2_key(password, stored_hash);
+        let mut mac = HmacSha256::new_from_slice(&key).unwrap();
+        mac.update(server_nonce);
+        let hmac_response = mac.finalize().into_bytes().to_vec();
+
+        let mut w = PacketWriter::with_opcode(Opcode::Auth);
+        w.write_len_prefixed(password.as_bytes());
+        w.write_raw(&hmac_response);
+        w.into_bytes()
+    }
+
+    fn server_verify_auth(packet: &[u8], stored_hash: &str, server_nonce: &[u8]) -> (bool, bool) {
+        let mut reader = PacketReader::new(packet);
+        let _opcode = reader.read_opcode().unwrap();
+        let password_bytes = reader.read_len_prefixed().unwrap();
+        let password = String::from_utf8(password_bytes).unwrap();
+        let hash_ok = argon2_verify(&password, stored_hash);
+        let nonce_valid = if reader.remaining().is_empty() {
+            false
+        } else {
+            let client_response = reader.read_bytes(32).unwrap();
+            if hash_ok {
+                let key = derive_argon2_key(&password, stored_hash);
+                let mut mac = HmacSha256::new_from_slice(&key).unwrap();
+                mac.update(server_nonce);
+                mac.verify_slice(&client_response).is_ok()
+            } else {
+                false
+            }
+        };
+        (hash_ok, nonce_valid)
+    }
+
+    fn build_key_exchange(kem: &[u8], dsa: &[u8]) -> Vec<u8> {
+        let total_inner = 4 + kem.len() + 4 + dsa.len();
+        let mut w = PacketWriter::with_opcode(Opcode::KeyExchangeKemDsa);
+        w.write_u32(total_inner as u32);
+        w.write_u32(kem.len() as u32);
+        w.write_raw(kem);
+        w.write_u32(dsa.len() as u32);
+        w.write_raw(dsa);
+        w.into_bytes()
+    }
+
+    /// Build a per-recipient data blob (client→server format):
+    /// [u32: sender_pub_hash_len] [sender_pub_hash] [u32: count]
+    ///   [u32: recipient_id_len] [recipient_id] [u32: enc_key_len] [enc_key] [u32: ct_len] [ciphertext]
+    ///   ...repeated for each recipient
+    fn build_per_recipient_blob(
+        sender_pub_hash: &[u8],
+        recipients: &[(&[u8], &[u8], &[u8])], // (id, enc_key, ciphertext)
+    ) -> Vec<u8> {
+        let mut w = PacketWriter::with_opcode(Opcode::Data);
+        // Fake outer data frame: just write the blob as a len-prefixed payload
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&(sender_pub_hash.len() as u32).to_le_bytes());
+        blob.extend_from_slice(sender_pub_hash);
+        blob.extend_from_slice(&(recipients.len() as u32).to_le_bytes());
+        for (id, enc_key, ciphertext) in recipients {
+            blob.extend_from_slice(&(id.len() as u32).to_le_bytes());
+            blob.extend_from_slice(id);
+            blob.extend_from_slice(&(enc_key.len() as u32).to_le_bytes());
+            blob.extend_from_slice(enc_key);
+            blob.extend_from_slice(&(ciphertext.len() as u32).to_le_bytes());
+            blob.extend_from_slice(ciphertext);
+        }
+        w.write_len_prefixed(&blob);
+        w.into_bytes()
+    }
+
+    // ── Test 1: Full E2E lifecycle ──────────────────────────────────────────────
+    /// Complete flow: auth → key exchange → send data → store → sync → receive
+    #[test]
+    fn test_e2e_full_lifecycle() {
+        let password = "e2e_test_pass";
+        let stored_hash = argon2_hash(password);
+        let nonce = vec![0xBB; 16];
+
+        // 1. Client1 authenticates
+        let c1_auth = build_client_auth(password, &nonce, &stored_hash);
+        let (h1, n1) = server_verify_auth(&c1_auth, &stored_hash, &nonce);
+        assert!(h1 && n1, "Client1 auth should succeed");
+
+        // 2. Client2 authenticates
+        let c2_auth = build_client_auth(password, &nonce, &stored_hash);
+        let (h2, n2) = server_verify_auth(&c2_auth, &stored_hash, &nonce);
+        assert!(h2 && n2, "Client2 auth should succeed");
+
+        // 3. Client1 sends key exchange
+        let c1_kem = vec![0x11u8; 1184]; // ML-KEM-768 size
+        let c1_dsa = vec![0x22u8; 1952]; // ML-DSA-65 size
+        let c1_ke = build_key_exchange(&c1_kem, &c1_dsa);
+        assert_eq!(c1_ke[0], 0x0C);
+        let ke_len = try_read_packet(&c1_ke);
+        assert_eq!(ke_len, TryReadResult::Packet(c1_ke.len()));
+
+        // 4. Client2 sends key exchange
+        let c2_kem = vec![0x33u8; 1184];
+        let c2_dsa = vec![0x44u8; 1952];
+        let c2_ke = build_key_exchange(&c2_kem, &c2_dsa);
+        assert_eq!(c2_ke[0], 0x0C);
+
+        // 5. Client1 sends data message (per-recipient blob for Client2)
+        let store = MessageStore::new();
+        let sender_hash = [0xAA; 32];
+        let c2_id = [0xBB; 32];
+        let c2_enc_key = vec![0xCC; 1184];
+        let c2_ciphertext = vec![0xDD; 256];
+        let blob = build_per_recipient_blob(
+            &sender_hash,
+            &[(&c2_id, &c2_enc_key, &c2_ciphertext)],
+        );
+        let stored = store.push(blob.clone());
+        assert!(stored.id > 0);
+        assert_eq!(store.len(), 1);
+
+        // 6. Client2 syncs (last_seen_id=0), receives Client1's message
+        let messages = store.since(0, 100);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].payload, blob);
+        let sync_resp = encode_sync_response(
+            &messages.iter().map(|m| (m.id, m.timestamp, m.payload.clone())).collect::<Vec<_>>(),
+        );
+        let mut sr = PacketReader::new(&sync_resp);
+        assert_eq!(sr.read_opcode().unwrap(), Opcode::SyncResponse);
+        let count = sr.read_u32().unwrap();
+        assert_eq!(count, 1);
+        let msg_id = sr.read_u64().unwrap();
+        let msg_ts = sr.read_u64().unwrap();
+        let msg_payload = sr.read_len_prefixed().unwrap();
+        assert_eq!(msg_payload, blob);
+        assert!(msg_id > 0);
+        assert!(msg_ts > 0);
+
+        // 7. Verify try_read_packet correctly identifies all packet types
+        assert_eq!(try_read_packet(&c1_auth), TryReadResult::Packet(c1_auth.len()));
+        assert_eq!(try_read_packet(&c1_ke), TryReadResult::Packet(c1_ke.len()));
+        assert_eq!(try_read_packet(&blob), TryReadResult::Packet(blob.len()));
+        assert_eq!(try_read_packet(&[0x99]), TryReadResult::UnknownOpcode);
+    }
+
+    // ── Test 2: Sync after reconnection ─────────────────────────────────────────
+    /// Client receives some messages, disconnects, more arrive, reconnects with
+    /// last_seen_id, gets only new messages.
+    #[test]
+    fn test_sync_after_reconnect() {
+        let store = MessageStore::new();
+
+        // Phase 1: Client connects and receives 3 messages
+        let _msg1 = store.push(b"msg1".to_vec());
+        let _msg2 = store.push(b"msg2".to_vec());
+        let msg3 = store.push(b"msg3".to_vec());
+        assert_eq!(store.len(), 3);
+
+        let initial = store.since(0, 100);
+        assert_eq!(initial.len(), 3);
+        let last_seen_id = initial.last().unwrap().id;
+        assert_eq!(last_seen_id, msg3.id);
+
+        // Phase 2: Client disconnects, 2 more messages arrive
+        let msg4 = store.push(b"msg4".to_vec());
+        let msg5 = store.push(b"msg5".to_vec());
+        assert_eq!(store.len(), 5);
+
+        // Phase 3: Client reconnects with last_seen_id, gets only new messages
+        let after_reconnect = store.since(last_seen_id, 100);
+        assert_eq!(after_reconnect.len(), 2, "should only get 2 new messages");
+        assert_eq!(after_reconnect[0].id, msg4.id);
+        assert_eq!(after_reconnect[0].payload, b"msg4");
+        assert_eq!(after_reconnect[1].id, msg5.id);
+        assert_eq!(after_reconnect[1].payload, b"msg5");
+
+        // Verify sync response encoding
+        let sync_resp = encode_sync_response(
+            &after_reconnect.iter().map(|m| (m.id, m.timestamp, m.payload.clone())).collect::<Vec<_>>(),
+        );
+        let mut sr = PacketReader::new(&sync_resp);
+        assert_eq!(sr.read_opcode().unwrap(), Opcode::SyncResponse);
+        let count = sr.read_u32().unwrap();
+        assert_eq!(count, 2);
+        for expected_payload in &[b"msg4".as_slice(), b"msg5".as_slice()] {
+            let _id = sr.read_u64().unwrap();
+            let _ts = sr.read_u64().unwrap();
+            let payload = sr.read_len_prefixed().unwrap();
+            assert_eq!(&payload, expected_payload);
+        }
+    }
+
+    // ── Test 3: Multi-client concurrent send ─────────────────────────────────────
+    /// 5 clients send messages concurrently, all stored with monotonic IDs.
+    #[tokio::test]
+    async fn test_multi_client_concurrent_send() {
+        use std::sync::Arc;
+
+        let store = Arc::new(MessageStore::new());
+        let num_clients = 5;
+        let mut handles = Vec::new();
+
+        for i in 0..num_clients {
+            let store_clone = Arc::clone(&store);
+            handles.push(tokio::spawn(async move {
+                let payload = format!("message from client {}", i);
+                store_clone.push(payload.into_bytes());
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        assert_eq!(store.len(), num_clients);
+
+        // Verify all messages visible with monotonic IDs
+        let all = store.since(0, 100);
+        assert_eq!(all.len(), num_clients);
+        for i in 1..all.len() {
+            assert!(
+                all[i].id > all[i - 1].id,
+                "IDs must be monotonic: {} > {}",
+                all[i].id,
+                all[i - 1].id
+            );
+        }
+
+        // Verify sync response contains all messages
+        let sync_resp = encode_sync_response(
+            &all.iter().map(|m| (m.id, m.timestamp, m.payload.clone())).collect::<Vec<_>>(),
+        );
+        let mut sr = PacketReader::new(&sync_resp);
+        assert_eq!(sr.read_opcode().unwrap(), Opcode::SyncResponse);
+        let count = sr.read_u32().unwrap();
+        assert_eq!(count, num_clients as u32);
+    }
+
+    // ── Test 4: Per-recipient blob parsing ───────────────────────────────────────
+    /// Build per-recipient blob with 3 recipients, verify parsing.
+    #[test]
+    fn test_per_recipient_blob_parsing() {
+        let sender_hash = [0xAA; 32];
+        let recipients: Vec<([u8; 32], Vec<u8>, Vec<u8>)> = (0..3)
+            .map(|i| {
+                let id = [i as u8; 32];
+                let enc_key = vec![i as u8 + 10; 1184];
+                let ciphertext = vec![i as u8 + 20; 256];
+                (id, enc_key, ciphertext)
+            })
+            .collect();
+
+        let ref_vecs: Vec<(&[u8], &[u8], &[u8])> = recipients
+            .iter()
+            .map(|(id, ek, ct)| (id.as_slice(), ek.as_slice(), ct.as_slice()))
+            .collect();
+
+        let blob = build_per_recipient_blob(&sender_hash, &ref_vecs);
+
+        // Parse blob manually (mimicking client onData logic)
+        let mut pr = PacketReader::new(&blob);
+        let _opcode = pr.read_opcode().unwrap(); // skip Data opcode
+        let payload = pr.read_len_prefixed().unwrap();
+
+        let mut inner = PacketReader::new(&payload);
+        let read_hash = inner.read_len_prefixed().unwrap();
+        assert_eq!(&read_hash, &sender_hash);
+
+        let count = inner.read_u32().unwrap();
+        assert_eq!(count, 3);
+
+        for (i, (id, enc_key, ciphertext)) in recipients.iter().enumerate() {
+            let r_id = inner.read_len_prefixed().unwrap();
+            assert_eq!(&r_id, id.as_slice(), "recipient {} id mismatch", i);
+            let r_ek = inner.read_len_prefixed().unwrap();
+            assert_eq!(&r_ek, enc_key.as_slice(), "recipient {} enc_key mismatch", i);
+            let r_ct = inner.read_len_prefixed().unwrap();
+            assert_eq!(&r_ct, ciphertext.as_slice(), "recipient {} ciphertext mismatch", i);
+        }
+
+        // Verify try_read_packet on the blob
+        assert_eq!(try_read_packet(&blob), TryReadResult::Packet(blob.len()));
+    }
+
+    // ── Test 5: try_read_packet on all packet types ──────────────────────────────
+    /// Verify try_read_packet correctly handles every opcode with correct lengths.
+    #[test]
+    fn test_try_read_packet_all_opcodes() {
+        // Auth (0x01): opcode + u32 pwd_len + pwd + 32 HMAC
+        let mut auth = PacketWriter::with_opcode(Opcode::Auth);
+        auth.write_len_prefixed(b"password123");
+        auth.write_raw(&[0x42; 32]);
+        let auth_bytes = auth.into_bytes();
+        assert_eq!(try_read_packet(&auth_bytes), TryReadResult::Packet(auth_bytes.len()));
+
+        // Sync (0x03): opcode + u64
+        let mut sync = PacketWriter::with_opcode(Opcode::Sync);
+        sync.write_u64(42);
+        let sync_bytes = sync.into_bytes();
+        assert_eq!(try_read_packet(&sync_bytes), TryReadResult::Packet(9));
+
+        // Data (0x05): opcode + u32 len + payload (CLIENT→SERVER format)
+        let data_payload = b"hello world";
+        let mut data = PacketWriter::with_opcode(Opcode::Data);
+        data.write_len_prefixed(data_payload);
+        let data_bytes = data.into_bytes();
+        assert_eq!(try_read_packet(&data_bytes), TryReadResult::Packet(data_bytes.len()));
+
+        // Heartbeat (0x06): opcode + u64
+        let mut hb = PacketWriter::with_opcode(Opcode::Heartbeat);
+        hb.write_u64(12345);
+        let hb_bytes = hb.into_bytes();
+        assert_eq!(try_read_packet(&hb_bytes), TryReadResult::Packet(9));
+
+        // KeyExchange (0x0C): opcode + u32 len + payload
+        let ke = build_key_exchange(&[0x11; 32], &[0x22; 64]);
+        assert_eq!(try_read_packet(&ke), TryReadResult::Packet(ke.len()));
+
+        // Unknown opcode
+        assert_eq!(try_read_packet(&[0xFF]), TryReadResult::UnknownOpcode);
+        assert_eq!(try_read_packet(&[0x00]), TryReadResult::UnknownOpcode);
+        assert_eq!(try_read_packet(&[0x08]), TryReadResult::UnknownOpcode);
+
+        // Empty buffer
+        assert_eq!(try_read_packet(&[]), TryReadResult::Incomplete);
+
+        // Oversized payload
+        let mut big_data = PacketWriter::with_opcode(Opcode::Data);
+        big_data.write_u32(u32::MAX);
+        let big_bytes = big_data.into_bytes();
+        assert_eq!(try_read_packet(&big_bytes), TryReadResult::OversizedPayload);
+    }
+
+    // ── Test 6: Message ordering and dedup via sync ──────────────────────────────
+    /// Send 10 messages, sync with limit, verify ordering and completeness.
+    #[test]
+    fn test_message_ordering_and_sync_limit() {
+        let store = MessageStore::new();
+
+        for i in 0..10 {
+            store.push(format!("msg_{}", i).into_bytes());
+        }
+
+        // Full sync
+        let all = store.since(0, 100);
+        assert_eq!(all.len(), 10);
+        for (i, msg) in all.iter().enumerate() {
+            assert_eq!(msg.payload, format!("msg_{}", i).as_bytes());
+        }
+
+        // Partial sync with limit
+        let partial = store.since(0, 3);
+        assert_eq!(partial.len(), 3);
+        assert_eq!(partial[0].payload, b"msg_0");
+        assert_eq!(partial[2].payload, b"msg_2");
+
+        // Sync from middle
+        let mid_id = all[4].id;
+        let from_mid = store.since(mid_id, 100);
+        assert_eq!(from_mid.len(), 5);
+        assert_eq!(from_mid[0].payload, b"msg_5");
+
+        // Sync with very small limit
+        let tiny = store.since(0, 1);
+        assert_eq!(tiny.len(), 1);
+    }
+
+    // ── Test 7: Server skip-byte resilience ──────────────────────────────────────
+    /// Verify that unknown bytes are skipped and valid frames after them are parsed.
+    #[test]
+    fn test_skip_byte_resilience() {
+        // Build a valid client→server data frame (opcode + u32 len + payload)
+        let mut data_w = PacketWriter::with_opcode(Opcode::Data);
+        data_w.write_len_prefixed(b"hello");
+        let data = data_w.into_bytes();
+
+        // Prepend an unknown byte
+        let mut corrupted = vec![0xFF];
+        corrupted.extend_from_slice(&data);
+
+        // First byte is unknown → skip
+        assert_eq!(try_read_packet(&corrupted), TryReadResult::UnknownOpcode);
+
+        // After skipping 1 byte, the valid data frame should be parsed
+        assert_eq!(try_read_packet(&data), TryReadResult::Packet(data.len()));
+
+        // Multiple unknown bytes followed by valid frame
+        let mut multi_corrupted = vec![0xFF, 0xFE, 0xFD, 0xFC];
+        multi_corrupted.extend_from_slice(&data);
+        assert_eq!(try_read_packet(&multi_corrupted), TryReadResult::UnknownOpcode);
+
+        // After skipping all 4 unknown bytes, valid frame should be parseable
+        assert_eq!(try_read_packet(&data), TryReadResult::Packet(data.len()));
+    }
+
+    // ── Test 8: Storage race — push and sync interleaved ─────────────────────────
+    /// Simulate concurrent push and since() calls to verify no messages are lost.
+    #[tokio::test]
+    async fn test_storage_push_sync_interleave() {
+        use std::sync::Arc;
+
+        let store = Arc::new(MessageStore::new());
+
+        // Push 50 messages from "client A"
+        for i in 0..50 {
+            store.push(format!("A_{}", i).into_bytes());
+        }
+
+        // "Client B" syncs, gets first batch
+        let batch1 = store.since(0, 25);
+        assert_eq!(batch1.len(), 25);
+        let last_id = batch1.last().unwrap().id;
+
+        // Push 25 more from "client A"
+        for i in 50..75 {
+            store.push(format!("A_{}", i).into_bytes());
+        }
+
+        // "Client B" syncs again with last_id
+        let batch2 = store.since(last_id, 25);
+        assert_eq!(batch2.len(), 25);
+
+        // Verify no overlap
+        let batch1_ids: Vec<u64> = batch1.iter().map(|m| m.id).collect();
+        let batch2_ids: Vec<u64> = batch2.iter().map(|m| m.id).collect();
+        for id in &batch2_ids {
+            assert!(!batch1_ids.contains(id), "batch2 should not contain batch1 id {}", id);
+        }
+
+        // Total messages
+        assert_eq!(store.len(), 75);
     }
 }

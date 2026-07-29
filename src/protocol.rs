@@ -15,10 +15,8 @@
 //!   server → client: id (u64) + timestamp (u64) + len + payload.
 //! * `0x06` Heartbeat     — either direction: client timestamp (u64).
 //! * `0x07` NewCertHash   — server → client: 32 raw SHA-256 bytes + expiry (u64).
-//! * `0x08` KeyExchange   — either direction: len (u32) + public key.
-//! * `0x09` KeyExchangeKem — either direction: ML-KEM public key.
-//! * `0x0A` KeyExchangeDsa — either direction: ML-DSA public key.
 //! * `0x0B` AuthChallenge — server → client: 16-byte random nonce.
+//! * `0x0C` KeyExchangeKemDsa — either direction: combined KEM + DSA public keys.
 
 use std::io::{self};
 
@@ -33,10 +31,8 @@ pub enum Opcode {
     Data = 0x05,
     Heartbeat = 0x06,
     NewCertHash = 0x07,
-    KeyExchange = 0x08,
-    KeyExchangeKem = 0x09,
-    KeyExchangeDsa = 0x0A,
     AuthChallenge = 0x0B,
+    KeyExchangeKemDsa = 0x0C,
 }
 
 impl Opcode {
@@ -50,10 +46,8 @@ impl Opcode {
             0x05 => Some(Opcode::Data),
             0x06 => Some(Opcode::Heartbeat),
             0x07 => Some(Opcode::NewCertHash),
-            0x08 => Some(Opcode::KeyExchange),
-            0x09 => Some(Opcode::KeyExchangeKem),
-            0x0A => Some(Opcode::KeyExchangeDsa),
             0x0B => Some(Opcode::AuthChallenge),
+            0x0C => Some(Opcode::KeyExchangeKemDsa),
             _ => None,
         }
     }
@@ -280,15 +274,8 @@ pub fn encode_new_cert_hash(hash: &[u8; 32], expires_at: u64) -> Vec<u8> {
     w.into_bytes()
 }
 
-/// Build a `KeyExchange` packet (raw relay of the public key).
-pub fn encode_key_exchange(public_key: &[u8]) -> Vec<u8> {
-    let mut w = PacketWriter::with_opcode(Opcode::KeyExchange);
-    w.write_len_prefixed(public_key);
-    w.into_bytes()
-}
-
-/// Build a tagged `KeyExchange` packet preserving the original opcode
-/// (0x09 for KEM, 0x0A for DSA) so clients can distinguish key types.
+/// Build a `KeyExchange` packet preserving the original opcode
+/// (0x0C for combined KEM+DSA) so clients can distinguish key types.
 pub fn encode_key_exchange_tagged(public_key: &[u8], opcode: Opcode) -> Vec<u8> {
     let mut w = PacketWriter::with_opcode(opcode);
     w.write_len_prefixed(public_key);

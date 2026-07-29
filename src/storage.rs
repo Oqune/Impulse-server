@@ -79,9 +79,9 @@ impl MessageStore {
             payload,
             timestamp,
         };
-        self.inner.insert(id, msg.clone());
         {
             let mut order = lock_order(&self.order);
+            self.inner.insert(id, msg.clone());
             order.push_back(id);
             while order.len() > MAX_MESSAGES {
                 if let Some(oldest) = order.front().copied() {
@@ -100,13 +100,17 @@ impl MessageStore {
     /// (`limit`) prevents a single `Sync` from replaying the entire buffer and
     /// producing a multi-hundred-MB response (C3).
     pub fn since(&self, after_id: u64, limit: usize) -> Vec<StoredMessage> {
-        let order = lock_order(&self.order);
-        order
-            .iter()
-            .copied()
-            .filter(|id| *id > after_id)
-            .filter_map(|id| self.inner.get(&id).map(|r| r.clone()))
-            .take(limit)
+        let ids: Vec<u64> = {
+            let order = lock_order(&self.order);
+            order
+                .iter()
+                .copied()
+                .filter(|id| *id > after_id)
+                .take(limit)
+                .collect()
+        };
+        ids.iter()
+            .filter_map(|id| self.inner.get(id).map(|r| r.clone()))
             .collect()
     }
     /// Remove messages older than the TTL. Called periodically.

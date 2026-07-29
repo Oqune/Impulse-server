@@ -7,10 +7,14 @@
 [![Rust](https://img.shields.io/badge/Rust-1.85%2B-darkblue?logo=rust)](https://www.rust-lang.org)
 [![WebTransport](https://img.shields.io/badge/Transport-WebTransport%20%2F%20QUIC-green)](https://w3c.github.io/webtransport/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/Oqune/Impulse-server/actions/workflows/ci.yml/badge.svg)](https://github.com/Oqune/Impulse-server/actions/workflows/ci.yml)
+[![CI](https://github.com/Oqune/Impulse-server/actions/workflows/server-build.yml/badge.svg)](https://github.com/Oqune/Impulse-server/actions/workflows/server-build.yml)
+[![Release](https://img.shields.io/github/v/release/Oqune/Impulse-server?label=latest)](https://github.com/Oqune/Impulse-server/releases)
 
 Secure, **ephemeral** messenger server over **WebTransport (QUIC)** with
 **TOFU** trust-on-first-use and password authentication.
+
+> **Client:** [Oqune/Impulse-client](https://github.com/Oqune/Impulse-client) —
+> Android post-quantum E2EE chat client for this server.
 
 </div>
 
@@ -27,10 +31,12 @@ Key design points:
 
 - **Transport:** WebTransport over QUIC only (`wtransport` 0.7). TLS 1.3 is
   mandatory; the old WSS transport was removed.
-- **Binary protocol:** length-prefixed binary frames with opcodes `0x01`–`0x0A`
+- **Binary protocol:** length-prefixed binary frames with opcodes `0x01`–`0x0C`
   (little-endian), not JSON.
-- **Auth:** clients must send `Auth` with the password; the server verifies a
-  SHA-256 hash in constant time.
+- **Auth:** server sends `AuthChallenge` (0x0B) with a 16-byte nonce and
+  Argon2id salt; client derives a key, computes HMAC-SHA-256, and responds
+  with `Auth` (0x01). Server verifies in constant time against a stored
+  Argon2id hash.
 - **TLS / Certificates:** self-signed **ECDSA P-256** certificates, valid **14 days**,
   rotated automatically with a **2-day overlap** window. The PEM material is
   persisted under `cert_dir` (resolved relative to the executable, `0600` on
@@ -42,7 +48,7 @@ Key design points:
 - **Storage:** in-RAM ring buffer, messages expire after 72h (`TTL`), bounded by
   count (`10_000`) and per-payload size (`1 MB`).
 - **Relay:** broadcast to all active sessions; late joiners catch up via
-  `Sync { last_seen_id }`. A single `Sync` returns at most `500` messages.
+  `Sync { last_seen_id }`. A single `Sync` returns at most `2000` messages.
 - **Admin:** a **TUI** with a two-column layout:
   - **Left column** (Info + QR + Certificate): server bind address, transport
     (`WebTransport/QUIC TLS1.3 (h3)`), crate version, SAN count, live
@@ -61,7 +67,7 @@ cargo build --release
 ./target/release/Impulse-server --config config.toml
 # or with CLI flags (which override the config file):
 ./target/release/Impulse-server --port 4433 --cert-dir cert_data \
-    --password-hash $(printf 'yourpassword' | sha256sum | cut -d' ' -f1)
+    --password-hash "$(./target/release/Impulse-server --hash-password yourpassword)"
 ```
 
 | Flag | Short | Description | Default |
@@ -70,11 +76,11 @@ cargo build --release
 | `--port` | `-p` | WebTransport (QUIC) listen port | `4433` |
 | `--cert-dir` | | Directory for the generated certificate/key | `cert_data` |
 | `--san` | | Extra SAN (DNS name or IP) for the self-signed cert (repeatable) | _none_ |
-| `--password-hash` | | SHA-256 hex of the client password (required) | _none_ |
+| `--password-hash` | | Argon2id encoded hash of the client password (required) | _none_ |
 | `--config` | | Path to a TOML config file | `./config.toml` |
 
-`password_hash` is **required** — there is no insecure default. Generate it with
-`printf 'pw' | sha256sum` or use the built-in helper:
+`password_hash` is **required** — there is no insecure default. Generate an
+Argon2id hash with the built-in helper:
 
 ```bash
 ./target/release/Impulse-server --hash-password yourpassword
@@ -209,38 +215,42 @@ followed by `len` bytes.
 
 | Opcode | Dir | Name | Fields |
 |--------|-----|------|--------|
-| `0x01` | C→S | Auth | `len`-prefixed password (UTF-8) |
+| `0x01` | C→S | Auth | `u32 LE pwd_len` + raw password bytes + 32 raw HMAC-SHA-256 bytes |
+| `0x0B` | S→C | AuthChallenge | 16-byte nonce + `u32 LE salt_len` + B64 Argon2id salt |
 | `0x02` | S→C | AuthResult | `u8` status (`0`=ok, `1`=fail) + optional `len`-prefixed message |
 | `0x03` | C→S | Sync | `u64` last_seen_id |
 | `0x04` | S→C | SyncResponse | `u32` count, then per message: `u64 id`, `u64 ts`, `len`-prefixed payload |
 | `0x05` | C→S / S→C | Data | C→S: `len`-prefixed payload. S→C: `u64 id`, `u64 ts`, `len`-prefixed payload |
 | `0x06` | both | Heartbeat | `u64` client_timestamp (echoed back) |
 | `0x07` | S→C | NewCertHash | exactly 32 raw SHA-256 bytes + `u64` unix expiry |
-| `0x08` | C→S / S→C | KeyExchange | `len`-prefixed public key (relayed to other clients) |
-| `0x09` | C→S / S→C | KeyExchangeKem | `len`-prefixed ML-KEM-768 public key (relayed to other clients) |
-| `0x0A` | C→S / S→C | KeyExchangeDsa | `len`-prefixed ML-DSA-65 public key (relayed to other clients) |
+| `0x0B` | S→C | AuthChallenge | 16-byte nonce + `u32 LE salt_len` + B64 Argon2id salt |
+| `0x0C` | C→S / S→C | KeyExchangeKemDsa | `len`-prefixed combined ML-KEM + ML-DSA-65 public keys (relayed atomically) |
 
 Unknown/invalid opcodes from a client close the connection. Idle streams are
-closed after 300s. Sessions are capped at 1024; oversized payloads (>1 MB) are
-dropped. A single `Sync` returns at most 500 messages. The wire parser validates
-declared packet length against the same 1 MB payload limit before any
-allocation, preventing CPU-DoS via inflated length prefixes (C1).
+closed after 300s. Sessions are capped at 1024 with `AtomicU64` unique IDs;
+aggregate buffer capacity is capped at 512 MB (`AtomicUsize`). Oversized
+payloads (>1 MB) are dropped. A single `Sync` returns at most 2000 messages.
+Key exchanges are cached per-session in a `DashMap` and replayed to newly
+authenticated sessions. The wire parser validates declared packet length against
+the same 1 MB payload limit before any allocation, preventing CPU-DoS via
+inflated length prefixes (C1).
 
 ## Security
 
 - Mandatory QUIC/TLS 1.3 transport (WebTransport).
 - Short-lived ECDSA P-256 certificates (14d) with automatic rotation (2d overlap);
-  the new cert is applied to the **live** TLS resolver (no restart) and
-  announced via `NewCertHash`.
+  PEM material persisted atomically. The new cert is applied to the **live** TLS
+  resolver (no restart) and announced via `NewCertHash`.
 - TOFU fingerprint pinning via QR code + `NewCertHash` control packet.
 - Post-quantum hybrid TLS key exchange (X25519Kyber768) via `aws-lc-rs`.
 - **Blind relay** — the server never decrypts message payloads. Clients encrypt
   locally using Per-Recipient KEM Wrapping (ML-KEM-768 + AES-256-GCM) and the
-  server only sees opaque bytes. `KeyExchangeKem` (0x09) and `KeyExchangeDsa`
-  (0x0A) opcodes relay ML-KEM and ML-DSA-65 public keys identically to the
-  existing `KeyExchange` (0x08) — the server stores nothing and inspects nothing.
+  server only sees opaque bytes.   `KeyExchangeKemDsa` (0x0C) opcodes relay combined ML-KEM and ML-DSA-65
+  public keys atomically — the server stores nothing and inspects nothing.
 - Ephemeral RAM-only storage, 72h TTL, bounded ring buffer and payload size.
-- Constant-time password-hash comparison.
+- Passwords stored as Argon2id hashes; challenge-response auth with
+  constant-time HMAC comparison.
+- KeyExchange replay protection via per-session `DashMap` cache.
 - Private key file restricted to `0600` on Unix; exclusive DACL on Windows.
 - Per-IP rate limiting (10 connections / 10s window) and session caps to mitigate DoS.
 - Idle sessions are closed after 300s to avoid leaking resources.
@@ -258,7 +268,7 @@ written to `logs/` with daily rotation and 7-day retention.
 src/
   cert.rs      — ECDSA P-256 cert generation, rotation, SHA-256 TOFU fingerprint, FS persist
   storage.rs   — ephemeral in-RAM message log (TTL 72h, sequence ids)
-  protocol.rs  — binary wire frames (opcodes 0x01–0x0A)
+  protocol.rs  — binary wire frames (opcodes 0x01–0x0C)
   server.rs    — WebTransport endpoint, session handling, broadcast relay
   tui.rs       — terminal UI: Server Info header, log stream, TOFU QR / fingerprint panel
   logging.rs   — tracing → TUI / rolling file bridge

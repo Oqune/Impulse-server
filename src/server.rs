@@ -24,7 +24,6 @@ use crate::cert::CertManager;
 use crate::cert::DynamicCertResolver;
 use crate::protocol::{
     Opcode, PacketReader, RelayedMessage, ServerPacketEncoder, encode_auth_challenge,
-    encode_key_exchange, encode_key_exchange_tagged,
 };
 use crate::storage::MessageStore;
 use crate::tui::TuiHandle;
@@ -38,10 +37,8 @@ fn opcode_name(b: u8) -> &'static str {
         0x05 => "Data",
         0x06 => "Heartbeat",
         0x07 => "NewCertHash",
-        0x08 => "KeyExchange",
-        0x09 => "KeyExchangeKem",
-        0x0A => "KeyExchangeDsa",
         0x0B => "AuthChallenge",
+        0x0C => "KeyExchangeKemDsa",
         _ => "UNKNOWN",
     }
 }
@@ -85,7 +82,7 @@ const MAX_CONCURRENT_SESSIONS: usize = 1024;
 
 /// Max number of messages returned by a single `Sync` (C3). Late joiners get at
 /// most this many; they should issue further `Sync` calls to catch up.
-const MAX_SYNC_MESSAGES: usize = 500;
+const MAX_SYNC_MESSAGES: usize = 2000;
 
 /// Max connections per IP within the rate-limit window.
 const MAX_CONNECTIONS_PER_IP: usize = 10;
@@ -113,8 +110,8 @@ pub struct RelayServer {
     config: crate::config::ServerSettings,
     cert_manager: Arc<tokio::sync::Mutex<CertManager>>,
     store: Arc<MessageStore>,
-    /// Broadcast hub for relayed data messages.
-    data_tx: broadcast::Sender<RelayedMessage>,
+    /// Broadcast hub for relayed data messages, with sender session id for exclusion.
+    data_tx: broadcast::Sender<(u64, RelayedMessage)>,
     /// Broadcast hub for control packets (NewCertHash).
     control_tx: broadcast::Sender<Vec<u8>>,
     /// KeyExchange packets with sender session id for exclusion.
@@ -184,9 +181,9 @@ impl RelayServer {
         };
 
         let store = Arc::new(MessageStore::new());
-        let (data_tx, _rx) = broadcast::channel(1024);
-        let (control_tx, _crx) = broadcast::channel(32);
-        let (keyexchange_tx, _krx) = broadcast::channel(256);
+        let (data_tx, _rx) = broadcast::channel(4096);
+        let (control_tx, _crx) = broadcast::channel(64);
+        let (keyexchange_tx, _krx) = broadcast::channel(512);
 
         let server = Self {
             config: config.clone(),
@@ -520,7 +517,10 @@ impl RelayServer {
                     tokio::select! {
                         result = data_sub.recv() => {
                             match result {
-                                Ok(msg) => {
+                                Ok((src_session, msg)) => {
+                                    if src_session == session_key {
+                                        continue;
+                                    }
                                     let packet = msg.to_packet();
                                     let op = if packet.is_empty() { 0 } else { packet[0] };
                                     debug!("[WRITER] Session {} <- DATA relay opcode=0x{:02x} ({}) len={}",
@@ -679,7 +679,7 @@ impl RelayServer {
                             // Process all complete packets.
                             loop {
                                 match try_read_packet(&buf) {
-                                    Ok(Some(packet_len)) => {
+                                    TryReadResult::Packet(packet_len) => {
                                         if packet_len > buf.len() {
                                             info!(
                                                 "[READER] Session {} partial packet: declared {} but buffer has {}, waiting",
@@ -720,7 +720,7 @@ impl RelayServer {
                                             break;
                                         }
                                     }
-                                    Ok(None) => {
+                                    TryReadResult::Incomplete => {
                                         debug!(
                                             "[READER] Session {} incomplete packet, waiting for more data (buf={} bytes)",
                                             session_key,
@@ -728,13 +728,23 @@ impl RelayServer {
                                         );
                                         break; // incomplete, wait for more data
                                     }
-                                    Err(()) => {
-                                        info!(
-                                            "[READER] Session {} UNKNOWN OPCODE in buffer (first byte=0x{:02x}), closing",
-                                            session_key,
-                                            if buf.is_empty() { 0 } else { buf[0] }
+                                    TryReadResult::UnknownOpcode => {
+                                        let bad = buf[0];
+                                        warn!(
+                                            "[READER] Session {} UNKNOWN BYTE 0x{:02x} at buffer start — skipping 1 byte (buf={} bytes remaining)",
+                                            session_key, bad, buf.len()
                                         );
-                                        break;
+                                        buf.remove(0);
+                                        total_buffered.fetch_sub(1, Ordering::Relaxed);
+                                    }
+                                    TryReadResult::OversizedPayload => {
+                                        warn!(
+                                            "[READER] Session {} OVERSIZED PAYLOAD (first byte=0x{:02x}, buf={} bytes) — closing session",
+                                            session_key,
+                                            if buf.is_empty() { 0 } else { buf[0] },
+                                            buf.len()
+                                        );
+                                        return; // fatal: stream is corrupted
                                     }
                                 }
                             }
@@ -1019,7 +1029,7 @@ impl RelayServer {
                     timestamp: stored.timestamp,
                     payload: stored.payload,
                 };
-                let subs = self.data_tx.send(relayed);
+                let subs = self.data_tx.send((session_key, relayed));
                 match subs {
                     Ok(n) => debug!(
                         "[DATA] Session {} broadcast OK to {} receivers",
@@ -1046,7 +1056,7 @@ impl RelayServer {
                     .map_err(|_| anyhow::anyhow!("direct channel closed"))?;
                 Ok(())
             }
-            Opcode::KeyExchange => {
+            Opcode::KeyExchangeKemDsa => {
                 if !*authenticated {
                     info!(
                         "[KEYEX] Session {} REJECTED: not authenticated",
@@ -1054,49 +1064,27 @@ impl RelayServer {
                     );
                     return Err(anyhow::anyhow!("not authenticated"));
                 }
-                let public_key = reader
-                    .read_len_prefixed()
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                let combined_payload = reader.remaining().to_vec();
                 debug!(
-                    "[KEYEX] Session {} public_key={} bytes",
+                    "[KEYEX] Session {} combined KEM+DSA payload={} bytes",
                     session_key,
-                    public_key.len()
+                    combined_payload.len()
                 );
 
-                let _ = self
-                    .keyexchange_tx
-                    .send((session_key, encode_key_exchange(&public_key)));
-                debug!("[KEYEX] Session {} relayed to all peers", session_key);
-                Ok(())
-            }
-            Opcode::KeyExchangeKem | Opcode::KeyExchangeDsa => {
-                if !*authenticated {
-                    info!(
-                        "[KEYEX] Session {} REJECTED: not authenticated",
-                        session_key
-                    );
-                    return Err(anyhow::anyhow!("not authenticated"));
-                }
-                let public_key = reader
-                    .read_len_prefixed()
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
-                debug!(
-                    "[KEYEX] Session {} {} public_key={} bytes",
-                    session_key,
-                    opcode_name(opcode as u8),
-                    public_key.len()
-                );
-
-                let packet = encode_key_exchange_tagged(&public_key, opcode);
+                // Build relay packet preserving the original client frame format:
+                // [0x0C] [u32: total_inner] [u32: kem_len] [kem] [u32: dsa_len] [dsa]
+                // combined_payload already contains everything after the opcode byte
+                // (including the outer u32 total_inner), so just prepend the opcode.
+                let mut packet = vec![opcode.as_u8()];
+                packet.extend_from_slice(&combined_payload);
                 let _ = self
                     .keyexchange_tx
                     .send((session_key, packet.clone()));
-                // Store the key exchange packet so newly-connecting peers can receive it.
                 self.key_exchange_store
                     .entry(session_key)
                     .or_default()
                     .push(packet);
-                debug!("[KEYEX] Session {} relayed as 0x{:02x} to all peers", session_key, opcode as u8);
+                debug!("[KEYEX] Session {} relayed combined KEM+DSA to all peers", session_key);
                 Ok(())
             }
             Opcode::AuthResult | Opcode::SyncResponse | Opcode::NewCertHash | Opcode::AuthChallenge => {
@@ -1192,73 +1180,65 @@ impl RelayServer {
     }
 }
 
+/// Result of [`try_read_packet`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TryReadResult {
+    /// A full packet is available (consumable now). Inner is the packet length.
+    Packet(usize),
+    /// Buffer is incomplete; wait for more bytes.
+    Incomplete,
+    /// Leading byte is not a recognized client opcode — skip 1 byte and retry.
+    UnknownOpcode,
+    /// The declared payload length exceeds `MAX_PACKET_LEN` — the session
+    /// must be closed because the stream is corrupted beyond recovery.
+    OversizedPayload,
+}
+
 /// Try to read a complete packet length from the buffer.
-///
-/// * `Ok(Some(packet_len))` — a full packet is available (consumable now).
-/// * `Ok(None)` — buffer is incomplete; wait for more bytes.
-/// * `Err(())` — the leading opcode is unknown. This is a fatal protocol
-///   violation, not "incomplete": the caller should close the connection.
-///   Returning `Ok(None)` here would let a single stray byte freeze parsing
-///   and grow the buffer unboundedly (DoS, E3).
-fn try_read_packet(buf: &[u8]) -> Result<Option<usize>, ()> {
+pub(crate) fn try_read_packet(buf: &[u8]) -> TryReadResult {
     if buf.is_empty() {
-        return Ok(None);
+        return TryReadResult::Incomplete;
     }
     let opcode = buf[0];
-    // Only client→server opcodes are accepted on the inbound stream. Opcodes
-    // 0x02/0x04/0x07 are server→client only; receiving them from a client is a
-    // protocol violation (and 0x04 in particular would otherwise make the
-    // length parser iterate up to `count` times — a CPU-DoS, see C1).
     let min_len = match opcode {
         0x01 => 1 + 4 + 32,  // Auth: opcode + len prefix + fixed 32-byte HMAC
         0x03 => 1 + 8,       // Sync: opcode + u64
         0x05 => 1 + 4,       // Data: opcode + len prefix
         0x06 => 1 + 8,       // Heartbeat: opcode + u64
-        0x08 => 1 + 4,       // KeyExchange: opcode + len prefix
-        0x09 => 1 + 4,       // KeyExchangeKem: opcode + len prefix
-        0x0A => 1 + 4,       // KeyExchangeDsa: opcode + len prefix
-        _ => return Err(()), // Unknown opcode / server-only opcode -> violation
+        0x0C => 1 + 4,       // KeyExchangeKemDsa: opcode + len prefix
+        _ => return TryReadResult::UnknownOpcode,
     };
     if buf.len() < min_len {
-        return Ok(None);
+        return TryReadResult::Incomplete;
     }
 
-    // For length-prefixed packets, read the length field. Auth (0x01) has a
-    // fixed 32-byte HMAC suffix after the password payload.
+    const MAX_PACKET_LEN: usize = 1 + 4 + MAX_PAYLOAD_BYTES;
+
     let len = match opcode {
         0x01 => {
-            // Auth: [0x01] [u32: pwd_len] [pwd_bytes] [32 raw bytes: HMAC]
             if buf.len() < 5 {
-                return Ok(None);
+                return TryReadResult::Incomplete;
             }
             let pwd_len = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
-            // Full packet: opcode(1) + len(4) + pwd_len + HMAC(32)
             let total = 1 + 4 + pwd_len + 32;
             if total > MAX_PACKET_LEN {
-                return Err(());
+                return TryReadResult::OversizedPayload;
             }
-            return Ok(Some(total));
+            return TryReadResult::Packet(total);
         }
-        0x05 | 0x08 | 0x09 | 0x0A => {
+        0x05 | 0x0C => {
             if buf.len() < 5 {
-                return Ok(None);
+                return TryReadResult::Incomplete;
             }
-            // payload length is the u32 right after the opcode
             u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize
         }
         0x03 | 0x06 => {
-            // Sync / Heartbeat: fixed 1 (opcode) + 8 (u64)
-            return Ok(Some(9));
+            return TryReadResult::Packet(9);
         }
-        _ => return Err(()),
+        _ => return TryReadResult::UnknownOpcode,
     };
-    // Bound the declared payload length to match the maximum accepted payload
-    // (MAX_PAYLOAD_BYTES = 1_000_000) so a malicious `len` cannot make us
-    // reserve an absurd buffer or report a huge "incomplete" packet (C1).
-    const MAX_PACKET_LEN: usize = 1 + 4 + MAX_PAYLOAD_BYTES; // opcode + len + payload
     if len > MAX_PACKET_LEN {
-        return Err(());
+        return TryReadResult::OversizedPayload;
     }
-    // Full packet = opcode (1) + length field (4) + payload (len).
-    Ok(Some(1 + 4 + len))
+    TryReadResult::Packet(1 + 4 + len)
 }
