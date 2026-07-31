@@ -3,15 +3,10 @@ name: Server Build & Release
 on:
   push:
     branches: [ main, master ]
-    paths:
-      - 'server/**'
-  pull_request:
-    branches: [ main, master ]
-    paths:
-      - 'server/**'
-  push:
     tags:
       - 'v*'
+  pull_request:
+    branches: [ main, master ]
 
 jobs:
   build:
@@ -32,9 +27,6 @@ jobs:
             binary: impulse-server.exe
 
     runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        working-directory: server
 
     steps:
       - uses: actions/checkout@v4
@@ -57,8 +49,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            server/target
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('server/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.target }}-
 
@@ -77,7 +69,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: server/${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
           retention-days: 14
 
   release:
