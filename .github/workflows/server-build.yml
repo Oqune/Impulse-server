@@ -15,16 +15,16 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: impulse-server-linux-amd64
-            binary: impulse-server
+            artifact: ImpulseServer-linux-amd64
+            ext: ""
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: impulse-server-linux-arm64
-            binary: impulse-server
+            artifact: ImpulseServer-linux-arm64
+            ext: ""
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            artifact: impulse-server-windows-amd64.exe
-            binary: impulse-server.exe
+            artifact: ImpulseServer-windows-amd64.exe
+            ext: ".exe"
 
     runs-on: ${{ matrix.os }}
 
@@ -54,22 +54,29 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.target }}-
 
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Rename binary (Linux)
         if: runner.os == 'Linux'
-        run: cp target/${{ matrix.target }}/release/impulse-server ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/impulse-server ${{ matrix.artifact }}${{ matrix.ext }}
 
       - name: Rename binary (Windows)
         if: runner.os == 'Windows'
-        run: Copy-Item "target/${{ matrix.target }}/release/impulse-server.exe" "${{ matrix.artifact }}"
+        run: Copy-Item "target/${{ matrix.target }}/release/impulse-server.exe" "${{ matrix.artifact }}${{ matrix.ext }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          name: ${{ matrix.artifact }}-v${{ steps.version.outputs.version }}
+          path: ${{ matrix.artifact }}${{ matrix.ext }}
           retention-days: 14
 
   release:
