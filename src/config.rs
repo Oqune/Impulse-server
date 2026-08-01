@@ -2,8 +2,13 @@
 //!
 //! Configuration is resolved from (in increasing priority):
 //!   1. built-in defaults,
-//!   2. an optional `config.toml` next to the executable,
+//!   2. an optional TOML config file (`--config <path>`, or `config.toml`
+//!      discovered in the current directory, then next to the executable),
 //!   3. command-line flags (which always win when provided).
+//!
+//! A config file that is explicitly requested or discovered but cannot be read
+//! or parsed is a fatal error — the server never silently falls back to
+//! defaults, so a misconfiguration surfaces immediately at startup.
 
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -14,10 +19,9 @@ use serde::{Deserialize, Serialize};
 pub struct CliArgs {
     #[arg(
         long,
-        default_value = "0.0.0.0",
-        help = "IPv4 bind address (default: 0.0.0.0)"
+        help = "IPv4 bind address (overrides `server.address` in the config file)"
     )]
-    pub host: String,
+    pub host: Option<String>,
 
     #[arg(
         long,
@@ -28,10 +32,9 @@ pub struct CliArgs {
     #[arg(
         short,
         long,
-        default_value_t = 4433,
-        help = "WebTransport (QUIC) listen port"
+        help = "WebTransport (QUIC) listen port (overrides the port in the config file)"
     )]
-    pub port: u16,
+    pub port: Option<u16>,
 
     #[arg(
         long,
@@ -63,6 +66,7 @@ pub struct CliArgs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerSettings {
     /// IPv4 bind address, e.g. `0.0.0.0:4433`.
     #[serde(default = "default_address_v4")]
@@ -71,11 +75,15 @@ pub struct ServerSettings {
     #[serde(default)]
     pub address6: String,
     /// Directory where the self-signed certificate + key are persisted.
+    #[serde(default = "default_cert_dir")]
     pub cert_dir: String,
     /// Extra Subject Alternative Names for the certificate.
     #[serde(default)]
     pub san: Vec<String>,
-    /// Password hash for authentication (Argon2id encoded). Required.
+    /// Password hash for authentication (Argon2id encoded). Required at
+    /// startup; may be supplied via config, `--password-hash`, or generated
+    /// with `--hash-password`.
+    #[serde(default)]
     pub password_hash: String,
 }
 
@@ -83,12 +91,16 @@ fn default_address_v4() -> String {
     "0.0.0.0:4433".to_string()
 }
 
+fn default_cert_dir() -> String {
+    "cert_data".to_string()
+}
+
 impl Default for ServerSettings {
     fn default() -> Self {
         Self {
             address: default_address_v4(),
             address6: String::new(),
-            cert_dir: "cert_data".to_string(),
+            cert_dir: default_cert_dir(),
             san: Vec::new(),
             password_hash: String::new(),
         }
@@ -96,6 +108,7 @@ impl Default for ServerSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct AppConfig {
     #[serde(default)]
     pub server: ServerSettings,
@@ -153,18 +166,26 @@ pub fn load_config(cli_args: &CliArgs) -> anyhow::Result<AppConfig> {
         std::process::exit(0);
     }
 
-    let mut config = load_file_config(cli_args.config.as_deref()).unwrap_or_default();
+    let mut config = load_file_config(cli_args.config.as_deref())?.unwrap_or_default();
 
-    // CLI flags override config file values.
-    config.server.address = format!("{}:{}", cli_args.host, cli_args.port);
+    // CLI flags override config file values. `--host`/`--port` only rewrite the
+    // corresponding part of `server.address` when explicitly given, so a value
+    // from the config file is preserved otherwise.
+    let file_address = config.server.address.clone();
+    let file_port = current_port(&file_address);
+    match (&cli_args.host, cli_args.port) {
+        (Some(host), Some(port)) => config.server.address = format!("{}:{}", bracket_host(host), port),
+        (Some(host), None) => config.server.address = format!("{}:{}", bracket_host(host), file_port),
+        (None, Some(port)) => {
+            let host = current_host(&file_address);
+            config.server.address = format!("{}:{}", host, port);
+        }
+        (None, None) => {}
+    }
 
     if let Some(ref host6) = cli_args.host6 {
-        let host6_bracketed = if host6.contains(':') && !host6.starts_with('[') {
-            format!("[{}]", host6)
-        } else {
-            host6.clone()
-        };
-        config.server.address6 = format!("{}:{}", host6_bracketed, cli_args.port);
+        let port = cli_args.port.unwrap_or(file_port);
+        config.server.address6 = format!("{}:{}", bracket_host(host6), port);
     }
 
     if let Some(cert_dir) = &cli_args.cert_dir {
@@ -182,6 +203,15 @@ pub fn load_config(cli_args: &CliArgs) -> anyhow::Result<AppConfig> {
 
     config.validate()?;
     Ok(config)
+}
+
+/// Wrap a host in square brackets when it is an IPv6 literal, e.g. `::` → `[::]`.
+fn bracket_host(host: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
 }
 
 /// Extract host from address string.
@@ -256,32 +286,45 @@ pub fn argon2_verify(password: &str, stored_hash: &str) -> bool {
         .is_ok()
 }
 
-/// Load `config.toml` from the given path, or from next to the executable.
-fn load_file_config(path: Option<&str>) -> Option<AppConfig> {
+/// Load `config.toml` from `--config <path>`, or auto-discover it in the
+/// current directory and next to the executable.
+///
+/// An explicit path that cannot be read, or any discovered file that cannot be
+/// parsed, is a fatal error (the server never silently falls back to defaults).
+/// `Ok(None)` means "no config file found" and is only returned when no
+/// `--config` was given and neither candidate exists.
+fn load_file_config(path: Option<&str>) -> anyhow::Result<Option<AppConfig>> {
     let path = match path {
         Some(p) => std::path::PathBuf::from(p),
         None => {
-            let exe = std::env::current_exe().ok()?;
-            let dir = exe.parent()?;
-            let candidate = dir.join("config.toml");
-            if !candidate.exists() {
-                return None;
+            let cwd = std::env::current_dir().ok().map(|d| d.join("config.toml"));
+            if let Some(c) = cwd.as_ref() && c.exists() {
+                c.clone()
+            } else if let Some(exe_dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
+                let candidate = exe_dir.join("config.toml");
+                if candidate.exists() {
+                    candidate
+                } else {
+                    return Ok(None);
+                }
+            } else {
+                return Ok(None);
             }
-            candidate
         }
     };
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("Warning: could not read config file {}: {}", path.display(), e);
-            return None;
+            anyhow::bail!("could not read config file {}: {}", path.display(), e);
         }
     };
     match toml::from_str(&text) {
-        Ok(config) => Some(config),
+        Ok(config) => {
+            eprintln!("Using config file: {}", path.display());
+            Ok(Some(config))
+        }
         Err(e) => {
-            eprintln!("Warning: could not parse config file {}: {}", path.display(), e);
-            None
+            anyhow::bail!("could not parse config file {}: {}", path.display(), e);
         }
     }
 }

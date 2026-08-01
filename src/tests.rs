@@ -1896,3 +1896,90 @@ mod e2e_integration_tests {
         assert_eq!(store.len(), 75);
     }
 }
+
+#[cfg(test)]
+mod config_tests {
+    use crate::config::{CliArgs, load_config};
+    use clap::Parser;
+
+    const TEST_HASH: &str = "$argon2id$v=19$m=47104,t=3,p=1$ZU3OGIF2VhIrUVb19y2izg$7njBEf6KUZtU/sC4HSVFti9DFEC3Mkwqd+uQsUqBAUc";
+
+    fn cli_with_config(path: Option<&str>) -> CliArgs {
+        let mut c = CliArgs::parse_from(["impulse-server"]);
+        c.config = path.map(str::to_string);
+        c
+    }
+
+    fn temp_config(name: &str, content: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "impulse-config-test-{name}-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&p, content).unwrap();
+        p
+    }
+
+    #[test]
+    fn config_address_is_used_when_no_flags() {
+        let path = temp_config(
+            "address",
+            &format!("[server]\naddress = \"127.0.0.1:9999\"\ncert_dir = \"certs\"\npassword_hash = \"{TEST_HASH}\"\n"),
+        );
+        let cfg = load_config(&cli_with_config(Some(path.to_str().unwrap()))).unwrap();
+        assert_eq!(cfg.server.address, "127.0.0.1:9999");
+        assert_eq!(cfg.server.cert_dir, "certs");
+    }
+
+    #[test]
+    fn missing_explicit_config_is_hard_error() {
+        let cli = cli_with_config(Some("definitely-missing-config.toml"));
+        let err = load_config(&cli).unwrap_err();
+        assert!(
+            err.to_string().contains("definitely-missing-config.toml"),
+            "error should reference the config path, got: {err}"
+        );
+    }
+
+    #[test]
+    fn malformed_config_is_hard_error() {
+        let path = temp_config("bad", "[server\nthis is not toml");
+        let err = load_config(&cli_with_config(Some(path.to_str().unwrap()))).unwrap_err();
+        assert!(
+            err.to_string().contains("parse"),
+            "error should mention the parse failure, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cert_dir_defaults_when_missing_in_config() {
+        let path = temp_config(
+            "nocert",
+            &format!("[server]\npassword_hash = \"{TEST_HASH}\"\n"),
+        );
+        let cfg = load_config(&cli_with_config(Some(path.to_str().unwrap()))).unwrap();
+        assert_eq!(cfg.server.cert_dir, "cert_data");
+    }
+
+    #[test]
+    fn password_hash_flag_fills_missing_config_hash() {
+        let path = temp_config("nohash", "[server]\naddress = \"0.0.0.0:7777\"\ncert_dir = \"certs\"\n");
+        let mut cli = cli_with_config(Some(path.to_str().unwrap()));
+        cli.password_hash = Some(TEST_HASH.to_string());
+        let cfg = load_config(&cli).unwrap();
+        assert_eq!(cfg.server.address, "0.0.0.0:7777");
+        assert_eq!(cfg.server.password_hash, TEST_HASH);
+    }
+
+    #[test]
+    fn unknown_config_field_is_rejected() {
+        let path = temp_config(
+            "typo",
+            &format!("[server]\npassword_hash = \"{TEST_HASH}\"\npor = 4433\n"),
+        );
+        let err = load_config(&cli_with_config(Some(path.to_str().unwrap()))).unwrap_err();
+        assert!(
+            err.to_string().contains("por") || err.to_string().contains("unknown field"),
+            "error should flag the unknown field, got: {err}"
+        );
+    }
+}

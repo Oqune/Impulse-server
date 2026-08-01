@@ -72,12 +72,12 @@ cargo build --release
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--host` | | Bind host (overrides config) | `0.0.0.0` |
-| `--port` | `-p` | WebTransport (QUIC) listen port | `4433` |
+| `--host` | | Bind host (overrides `server.address` in the config file) | from config / `0.0.0.0` |
+| `--port` | `-p` | WebTransport (QUIC) listen port (overrides the port in the config file) | from config / `4433` |
 | `--cert-dir` | | Directory for the generated certificate/key | `cert_data` |
 | `--san` | | Extra SAN (DNS name or IP) for the self-signed cert (repeatable) | _none_ |
 | `--password-hash` | | Argon2id encoded hash of the client password (required) | _none_ |
-| `--config` | | Path to a TOML config file | `./config.toml` |
+| `--config` | | Path to a TOML config file; auto-discovered as `config.toml` in the working directory, then next to the executable | auto-discover |
 
 `password_hash` is **required** — there is no insecure default. Generate an
 Argon2id hash with the built-in helper:
@@ -85,6 +85,11 @@ Argon2id hash with the built-in helper:
 ```bash
 ./target/release/Impulse-server --hash-password yourpassword
 ```
+
+The server prints `Using config file: <path>` at startup when a config file is
+loaded. A config file that is explicitly requested (`--config`) or discovered
+but cannot be read or parsed is a fatal startup error — the server never
+silently falls back to defaults.
 
 ## Production deployment
 

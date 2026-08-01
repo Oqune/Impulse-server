@@ -1,11 +1,16 @@
 # Impulse server configuration.
-# Copy to `config.toml` next to the executable, or pass `--config <path>`.
+# Copy to `config.toml` next to the executable, into the working directory,
+# or pass the path explicitly with `--config <path>`.
 # CLI flags always override values here.
 
 [server]
 # Socket address the WebTransport (QUIC) endpoint binds to.
 # WebTransport standard port (4433). Client defaults to this port as well.
+# `--host` / `--port` flags override the corresponding parts of this value.
 address = "0.0.0.0:4433"
+
+# Optional IPv6 bind address, e.g. "[::]:4433". Empty (or unset) = disabled.
+# address6 = "[::]:4433"
 
 # Directory where the self-signed certificate + key are persisted (relative to exe).
 cert_dir = "cert_data"
@@ -13,9 +18,9 @@ cert_dir = "cert_data"
 # Extra Subject Alternative Names for the generated certificate (DNS or IP).
 san = []
 
-# REQUIRED. SHA-256 (hex) of the password. The client hashes the password
-# client-side and sends the hex string; the server compares it directly.
+# REQUIRED. Argon2id encoded password hash. The client sends the password
+# Argon2id-hashed; the server compares it directly against this value.
 # Generate with:
-#   printf 'yourpassword' | sha256sum
-# or using the `impulse-server --hash-password <pw>` command.
-password_hash = "ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f"
+#   impulse-server --hash-password <password>
+# IMPORTANT: replace this placeholder (it is a real hash of "changeme").
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$09ZyMveZKFvU72Y1d+HK4A$RHTplW58qDd8WgZKLqnWs7MrnFS3ycb9cLIFiMJI7+s"
