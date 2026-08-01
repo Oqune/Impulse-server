@@ -164,6 +164,19 @@ docker run -d \
   impulse-server
 ```
 
+### NixOS
+
+```console
+$ nix build github:Oqune/Impulse-server
+$ ./result/bin/impulse-server --help
+```
+
+Или установите в свой профиль:
+
+```console
+$ nix profile install github:Oqune/Impulse-server
+```
+
 ### Фаервол
 
 QUIC использует UDP. Убедитесь, что выбранный порт открыт:

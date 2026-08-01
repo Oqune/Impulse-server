@@ -166,6 +166,19 @@ docker run -d \
   impulse-server
 ```
 
+### NixOS
+
+```console
+$ nix build github:Oqune/Impulse-server
+$ ./result/bin/impulse-server --help
+```
+
+Or install into your profile:
+
+```console
+$ nix profile install github:Oqune/Impulse-server
+```
+
 ### Firewall
 
 QUIC uses UDP. Ensure the chosen port is allowed:
