@@ -196,16 +196,21 @@ New-NetFirewallRule -DisplayName "Impulse QUIC" -Direction Inbound -Protocol UDP
 
 Impulse-server написан на переносимом Rust (edition 2024) и собирается на целях
 ниже при наличии рабочей Rust-тулчейна и UDP/QUIC сети. CI публикует релизные
-бинарники для Linux/Windows на x86-64 и ARM64.
+бинарники и `.deb`/`.rpm` пакеты для Linux на x86-64 и ARM64, а также релизные
+бинарники для Linux ARMv7/RISC-V 64 и Windows на x86-64 и ARM64.
 
 | Платформа | Target triple | Статус | Примечания |
 |-----------|---------------|--------|------------|
 | Linux (x86-64) | `x86_64-unknown-linux-gnu` | ✅ CI tested | Рекомендуется для серверов |
 | Linux (ARM64) | `aarch64-unknown-linux-gnu` | ✅ CI tested (cross) | AWS Graviton, Raspberry Pi 4 (64-bit OS) |
+| Linux (ARMv7) | `armv7-unknown-linux-gnueabihf` | ✅ CI tested (cross) | Raspberry Pi 2/3, 32-bit OS |
+| Linux (RISC-V 64) | `riscv64gc-unknown-linux-gnu` | ✅ CI tested (cross) | например VisionFive 2 |
 | Windows (x86-64) | `x86_64-pc-windows-msvc` | ✅ CI tested | Консольное приложение; биндится на UDP/QUIC порт напрямую |
+| Windows (ARM64) | `aarch64-pc-windows-msvc` | ✅ CI tested | Устройства на Windows on ARM |
 | FreeBSD / BSD | `x86_64-unknown-freebsd` | ⚠️ Manual only | У `aws-lc-sys` нет FreeBSD sysroot для кросс-компиляции; требуется нативная тулчейн |
 
-Готовые бинарники для всех ✅ и ⚠️ строк (кроме FreeBSD) прикреплены к каждому GitHub Release.
+Готовые бинарники для всех ✅ и ⚠️ строк (кроме FreeBSD) прикреплены к каждому
+GitHub Release; `.deb` и `.rpm` пакеты собираются для Linux x86-64 и ARM64.
 
 ### Требования
 
