@@ -100,7 +100,7 @@ summary = "Secure ephemeral messenger server over WebTransport"
 description = "Impulse Server - secure ephemeral messenger server over WebTransport (QUIC) with TOFU trust-on-first-use"
 version = "2.5.0"
 assets = [
-    ["target/release/impulse-server", "/usr/bin/impulse-server", "755"],
-    ["config.toml.example", "/etc/impulse-server/config.toml", "644"],
-    ["packaging/impulse-server.service", "/usr/lib/systemd/system/", "644"],
+    { source = "target/release/impulse-server", dest = "/usr/bin/impulse-server", mode = "755" },
+    { source = "config.toml.example", dest = "/etc/impulse-server/config.toml", mode = "644" },
+    { source = "packaging/impulse-server.service", dest = "/usr/lib/systemd/system/", mode = "644" },
 ]
