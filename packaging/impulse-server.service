@@ -1,0 +1,14 @@
+[Unit]
+Description=Impulse Server (WebTransport messenger)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/impulse-server
+Restart=on-failure
+RestartSec=3
+WorkingDirectory=/etc/impulse-server
+
+[Install]
+WantedBy=multi-user.target

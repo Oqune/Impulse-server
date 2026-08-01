@@ -79,3 +79,29 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+[package.metadata.deb]
+name = "impulse-server"
+maintainer = "oqune"
+copyright = "2026, oqune"
+license = "MIT"
+section = "net"
+priority = "optional"
+depends = "$auto"
+assets = [
+    ["target/release/impulse-server", "usr/bin/", "755"],
+    ["config.toml.example", "etc/impulse-server/config.toml", "644"],
+    ["packaging/impulse-server.service", "lib/systemd/system/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "impulse-server"
+license = "MIT"
+summary = "Secure ephemeral messenger server over WebTransport"
+description = "Impulse Server - secure ephemeral messenger server over WebTransport (QUIC) with TOFU trust-on-first-use"
+version = "2.5.0"
+assets = [
+    ["target/release/impulse-server", "/usr/bin/impulse-server", "755"],
+    ["config.toml.example", "/etc/impulse-server/config.toml", "644"],
+    ["packaging/impulse-server.service", "/usr/lib/systemd/system/", "644"],
+]

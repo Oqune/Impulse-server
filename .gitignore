@@ -34,3 +34,9 @@ Thumbs.db
 
 # RustRover / CLion shelved changes
 .shelf/
+
+# Package build artifacts (.deb / .rpm)
+*.deb
+*.rpm
+target/deb/
+target/generate-rpm/
