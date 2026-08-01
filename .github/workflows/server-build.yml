@@ -143,14 +143,25 @@ jobs:
       - name: Build rpm (arm64)
         run: cargo generate-rpm --target aarch64-unknown-linux-gnu
 
+      - name: Rename packages to unified naming
+        shell: bash
+        run: |
+          set -e
+          find target -name 'impulse-server_*_amd64.deb' -exec mv -f {} ImpulseServer-linux-amd64.deb \;
+          find target -name 'impulse-server_*_arm64.deb' -exec mv -f {} ImpulseServer-linux-arm64.deb \;
+          find target -name 'impulse-server-*.x86_64.rpm' -exec mv -f {} ImpulseServer-linux-amd64.rpm \;
+          find target -name 'impulse-server-*.aarch64.rpm' -exec mv -f {} ImpulseServer-linux-arm64.rpm \;
+          ls -la ImpulseServer-linux-amd64.deb ImpulseServer-linux-arm64.deb ImpulseServer-linux-amd64.rpm ImpulseServer-linux-arm64.rpm
+
       - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
           name: packages
           path: |
-            target/debian/*.deb
-            target/*/debian/*.deb
-            target/*/generate-rpm/*.rpm
+            ImpulseServer-linux-amd64.deb
+            ImpulseServer-linux-arm64.deb
+            ImpulseServer-linux-amd64.rpm
+            ImpulseServer-linux-arm64.rpm
           retention-days: 14
 
   release:

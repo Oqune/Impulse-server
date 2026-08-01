@@ -218,6 +218,9 @@ release binaries for Linux ARMv7/RISC-V 64 and Windows on x86-64 and ARM64.
 
 Prebuilt binaries for every ✅ and ⚠️ row (except FreeBSD) are attached to each
 GitHub Release; `.deb` and `.rpm` packages are built for Linux x86-64 and ARM64.
+Release artifacts follow the unified naming scheme `ImpulseServer-<os>-<arch>.<ext>`
+(e.g. `ImpulseServer-linux-amd64.tar.gz`, `ImpulseServer-windows-arm64.zip`,
+`ImpulseServer-linux-arm64.deb`, `ImpulseServer-linux-arm64.rpm`).
 
 ### Requirements
 

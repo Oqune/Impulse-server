@@ -216,6 +216,9 @@ Impulse-server написан на переносимом Rust (edition 2024) и
 
 Готовые бинарники для всех ✅ и ⚠️ строк (кроме FreeBSD) прикреплены к каждому
 GitHub Release; `.deb` и `.rpm` пакеты собираются для Linux x86-64 и ARM64.
+Артефакты релиза используют единую схему имён `ImpulseServer-<os>-<arch>.<ext>`
+(например, `ImpulseServer-linux-amd64.tar.gz`, `ImpulseServer-windows-arm64.zip`,
+`ImpulseServer-linux-arm64.deb`, `ImpulseServer-linux-arm64.rpm`).
 
 ### Требования
 
