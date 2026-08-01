@@ -51,6 +51,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set version
+        shell: bash
+        run: |
+          VERSION=$(grep -m1 '^version =' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
@@ -87,7 +93,7 @@ jobs:
           cp target/${{ matrix.target }}/release/impulse-server pkg/ImpulseServer-${{ matrix.arch }}/impulse-server
           cp LICENSE pkg/ImpulseServer-${{ matrix.arch }}/
           cp config.toml.example pkg/ImpulseServer-${{ matrix.arch }}/
-          tar -C pkg -czf ImpulseServer-linux-${{ matrix.arch }}.tar.gz ImpulseServer-${{ matrix.arch }}
+          tar -C pkg -czf ImpulseServer-$VERSION-linux-${{ matrix.arch }}.tar.gz ImpulseServer-${{ matrix.arch }}
 
       - name: Package (Windows zip)
         if: matrix.family == 'windows'
@@ -98,13 +104,13 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/impulse-server.exe" "$dir/impulse-server.exe"
           Copy-Item "LICENSE" "$dir/"
           Copy-Item "config.toml.example" "$dir/"
-          Compress-Archive -Path "$dir" -DestinationPath "ImpulseServer-windows-${{ matrix.arch }}.zip"
+          Compress-Archive -Path "$dir" -DestinationPath "ImpulseServer-$env:VERSION-windows-${{ matrix.arch }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ImpulseServer-${{ matrix.family }}-${{ matrix.arch }}
-          path: ImpulseServer-${{ matrix.family }}-${{ matrix.arch }}.*
+          name: ImpulseServer-${{ env.VERSION }}-${{ matrix.family }}-${{ matrix.arch }}
+          path: ImpulseServer-${{ env.VERSION }}-${{ matrix.family }}-${{ matrix.arch }}.*
           retention-days: 14
 
   package:
@@ -114,6 +120,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set version
+        shell: bash
+        run: |
+          VERSION=$(grep -m1 '^version =' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -147,21 +159,21 @@ jobs:
         shell: bash
         run: |
           set -e
-          find target -name 'impulse-server_*_amd64.deb' -exec mv -f {} ImpulseServer-linux-amd64.deb \;
-          find target -name 'impulse-server_*_arm64.deb' -exec mv -f {} ImpulseServer-linux-arm64.deb \;
-          find target -name 'impulse-server-*.x86_64.rpm' -exec mv -f {} ImpulseServer-linux-amd64.rpm \;
-          find target -name 'impulse-server-*.aarch64.rpm' -exec mv -f {} ImpulseServer-linux-arm64.rpm \;
-          ls -la ImpulseServer-linux-amd64.deb ImpulseServer-linux-arm64.deb ImpulseServer-linux-amd64.rpm ImpulseServer-linux-arm64.rpm
+          find target -name 'impulse-server_*_amd64.deb' -exec mv -f {} ImpulseServer-$VERSION-linux-amd64.deb \;
+          find target -name 'impulse-server_*_arm64.deb' -exec mv -f {} ImpulseServer-$VERSION-linux-arm64.deb \;
+          find target -name 'impulse-server-*.x86_64.rpm' -exec mv -f {} ImpulseServer-$VERSION-linux-amd64.rpm \;
+          find target -name 'impulse-server-*.aarch64.rpm' -exec mv -f {} ImpulseServer-$VERSION-linux-arm64.rpm \;
+          ls -la ImpulseServer-$VERSION-linux-amd64.deb ImpulseServer-$VERSION-linux-arm64.deb ImpulseServer-$VERSION-linux-amd64.rpm ImpulseServer-$VERSION-linux-arm64.rpm
 
       - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
           name: packages
           path: |
-            ImpulseServer-linux-amd64.deb
-            ImpulseServer-linux-arm64.deb
-            ImpulseServer-linux-amd64.rpm
-            ImpulseServer-linux-arm64.rpm
+            ImpulseServer-${{ env.VERSION }}-linux-amd64.deb
+            ImpulseServer-${{ env.VERSION }}-linux-arm64.deb
+            ImpulseServer-${{ env.VERSION }}-linux-amd64.rpm
+            ImpulseServer-${{ env.VERSION }}-linux-arm64.rpm
           retention-days: 14
 
   release:
