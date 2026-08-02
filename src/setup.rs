@@ -39,10 +39,23 @@ pub fn write_config_file(path: &Path, cfg: &AppConfig, overwrite: bool) -> anyho
     Ok(())
 }
 
+/// Error hint for a failed password attempt; `None` on the last attempt so the
+/// user is not told to "try again" right before the wizard bails.
+fn attempt_error_message(attempt: usize, mismatch: bool) -> Option<&'static str> {
+    if attempt == 2 {
+        return None;
+    }
+    Some(if mismatch {
+        "Passwords do not match, try again."
+    } else {
+        "Password must not be empty, try again."
+    })
+}
+
 /// Prompt for a password twice (hidden input, rpassword). Up to 3 attempts,
 /// then an error. Rejects empty passwords and mismatches.
 pub fn prompt_password(prompt: &str) -> anyhow::Result<String> {
-    for _ in 0..3 {
+    for attempt in 0..3 {
         print!("{prompt}");
         io::stdout().flush()?;
         let first = rpassword::read_password()?;
@@ -52,10 +65,8 @@ pub fn prompt_password(prompt: &str) -> anyhow::Result<String> {
         if first == second && !first.is_empty() {
             return Ok(first);
         }
-        if first != second {
-            eprintln!("Passwords do not match, try again.");
-        } else {
-            eprintln!("Password must not be empty, try again.");
+        if let Some(msg) = attempt_error_message(attempt, first != second) {
+            eprintln!("{msg}");
         }
     }
     anyhow::bail!("too many failed password attempts")
@@ -87,7 +98,7 @@ pub fn run_first_run_wizard() -> anyhow::Result<()> {
     };
     cfg.validate()?;
     write_config_file(Path::new("config.toml"), &cfg, false)?;
-    eprintln!("Config written to config.toml.");
+    println!("Config written to config.toml.");
     Ok(())
 }
 
@@ -108,17 +119,28 @@ pub fn run_init_wizard(force: bool) -> anyhow::Result<()> {
         &settings.cert_dir,
     )?;
     let san_line = prompt_line("Extra SANs (comma-separated, empty = none): ", "")?;
-    if !san_line.is_empty() {
-        settings.san = san_line
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-    }
+    settings.san = san_line
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     let cfg = crate::config::AppConfig { server: settings };
     cfg.validate()?;
     write_config_file(Path::new("config.toml"), &cfg, force)?;
     println!("Config written to config.toml. Run impulse-server to start.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::attempt_error_message;
+
+    #[test]
+    fn last_attempt_gets_no_try_again_message() {
+        assert!(attempt_error_message(2, true).is_none(), "final attempt must not say 'try again'");
+        assert!(attempt_error_message(2, false).is_none(), "final attempt must not say 'try again'");
+        assert!(attempt_error_message(0, true).is_some());
+        assert!(attempt_error_message(1, false).is_some());
+    }
 }

@@ -1900,7 +1900,7 @@ mod e2e_integration_tests {
 #[cfg(test)]
 mod config_tests {
     use crate::config::{CliArgs, SetupCommand, load_config, resolve_command};
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn commands_are_mutually_exclusive() {
@@ -1934,11 +1934,23 @@ mod config_tests {
         let c = CliArgs::parse_from(["impulse-server"]);
         assert!(matches!(resolve_command(&c).unwrap(), SetupCommand::Run));
 
-        let c = CliArgs::parse_from(["impulse-server", "--force"]);
-        assert!(matches!(resolve_command(&c).unwrap(), SetupCommand::Run));
-
         let c = CliArgs::parse_from(["impulse-server", "--init", "--force"]);
         assert!(matches!(resolve_command(&c).unwrap(), SetupCommand::Init));
+    }
+
+    #[test]
+    fn force_without_init_is_rejected() {
+        let c = CliArgs::parse_from(["impulse-server", "--force"]);
+        assert!(resolve_command(&c).is_err(), "--force without --init must be rejected");
+    }
+
+    #[test]
+    fn init_help_mentions_certificate_directory() {
+        let help = CliArgs::command().render_long_help().to_string();
+        assert!(
+            help.contains("certificate directory"),
+            "--init help should mention the certificate-directory prompt"
+        );
     }
 
     const TEST_HASH: &str = "$argon2id$v=19$m=47104,t=3,p=1$ZU3OGIF2VhIrUVb19y2izg$7njBEf6KUZtU/sC4HSVFti9DFEC3Mkwqd+uQsUqBAUc";

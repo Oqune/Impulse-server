@@ -63,7 +63,7 @@ pub struct CliArgs {
 
     #[arg(
         long,
-        help = "Interactively create a config.toml (prompts for password, address, SANs) and exit"
+        help = "Interactively create a config.toml (prompts for password, address, certificate directory, SANs) and exit"
     )]
     pub init: bool,
 
@@ -99,6 +99,9 @@ pub fn resolve_command(cli: &CliArgs) -> anyhow::Result<SetupCommand> {
         usize::from(cli.license) + usize::from(cli.init) + usize::from(cli.hash_password.is_some());
     if count > 1 {
         anyhow::bail!("--license, --init, and --hash-password are mutually exclusive");
+    }
+    if cli.force && !cli.init {
+        anyhow::bail!("--force requires --init");
     }
     if cli.license {
         return Ok(SetupCommand::PrintLicense);
