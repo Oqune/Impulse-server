@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Semaphore, broadcast, mpsc};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 use wtransport::endpoint::endpoint_side;
 use wtransport::{Endpoint, ServerConfig};
 
@@ -634,9 +634,9 @@ impl RelayServer {
                             break; // EOF
                         }
                         Ok(Ok(n)) => {
-                            if tracing::enabled!(tracing::Level::DEBUG) {
-                                debug!("[READER] Session {} raw chunk: {} bytes", session_key, n);
-                                debug!(
+                            if tracing::enabled!(tracing::Level::TRACE) {
+                                trace!("[READER] Session {} raw chunk: {} bytes", session_key, n);
+                                trace!(
                                     "[READER] Session {} hex: {}",
                                     session_key,
                                     hex_dump(&chunk[..n], 128)
