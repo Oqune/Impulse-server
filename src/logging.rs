@@ -77,9 +77,13 @@ impl<'a> tracing::field::Visit for MessageVisitor<'a> {
 }
 
 /// Install the global tracing subscriber, sending events to the TUI and
-/// a rolling log file under `logs/`. Must be called once before logging.
+/// a rolling log file under `logs/`. The same `EnvFilter` gates both layers.
+/// Must be called once before logging.
 pub fn init_tracing(tui: TuiHandle, env_filter: &str) {
-    let tui_layer = TuiLogLayer { tui };
+    let filter = tracing_subscriber::EnvFilter::try_new(env_filter)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    let tui_layer = TuiLogLayer { tui }.with_filter(filter.clone());
 
     // Ensure the logs directory exists before creating the rolling file appender.
     let _ = std::fs::create_dir_all("logs");
@@ -97,10 +101,7 @@ pub fn init_tracing(tui: TuiHandle, env_filter: &str) {
                 .with_writer(layer)
                 .with_timer(BracketTimer)
                 .with_ansi(false)
-                .with_filter(
-                    tracing_subscriber::EnvFilter::try_new(env_filter)
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-                ),
+                .with_filter(filter),
         ),
         Err(e) => {
             eprintln!("Warning: could not create log file layer: {}", e);

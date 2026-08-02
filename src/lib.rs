@@ -57,7 +57,8 @@ pub async fn run(app_config: AppConfig, shutdown: Arc<Notify>) -> Result<()> {
     let tui = tui::spawn_tui(cert_view, shutdown.clone())?;
 
     // Route tracing output into the TUI + rotating log file.
-    logging::init_tracing(tui.clone(), "debug");
+    let env_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "debug".to_string());
+    logging::init_tracing(tui.clone(), &env_filter);
 
     // Log the TOFU payload — it can be copied into the client's manual entry
     // when the QR code cannot be scanned.
