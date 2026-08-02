@@ -36,7 +36,7 @@ use crate::cert::DynamicCertResolver;
 use crate::protocol::limits::MAX_PAYLOAD_BYTES;
 use crate::protocol::{Opcode, RelayedMessage};
 use crate::storage::MessageStore;
-use crate::tui::TuiHandle;
+use crate::ui::TuiHandle;
 
 fn op_name(op: u8) -> &'static str {
     Opcode::from_u8(op).map(Opcode::display_name).unwrap_or("UNKNOWN")
@@ -196,7 +196,7 @@ impl RelayServer {
         } else {
             format!("{}, {}", config.address, config.address6)
         };
-        tui.set_info(crate::tui::ServerInfo {
+        tui.set_info(crate::ui::view::ServerInfo {
             address: display_address,
             san_count: config.san.len(),
             ttl_hours: crate::storage::MESSAGE_TTL.as_secs() / 3600,
@@ -386,5 +386,18 @@ impl RelayServer {
         if pruned > 0 {
             debug!("Pruned {} expired IP rate-limiter entries", pruned);
         }
+    }
+
+    /// Snapshot the live-session registry as rows for the TUI sessions panel.
+    fn session_rows(&self) -> Vec<crate::ui::view::SessionRow> {
+        self.sessions
+            .iter()
+            .map(|entry| crate::ui::view::SessionRow {
+                key: *entry.key(),
+                ip: entry.value().ip,
+                authenticated: entry.value().authenticated,
+                age: entry.value().connected_at.elapsed(),
+            })
+            .collect()
     }
 }

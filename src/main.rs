@@ -59,7 +59,8 @@ async fn main() -> Result<()> {
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(
             std::io::stdout(),
-            crossterm::terminal::LeaveAlternateScreen
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::event::DisableMouseCapture
         );
         eprintln!("Fatal error: {}", e);
         std::process::exit(1);

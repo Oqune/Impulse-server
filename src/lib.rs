@@ -6,7 +6,7 @@
 //! * `storage` — ephemeral in-RAM message log with 72h TTL and sequence ids.
 //! * `protocol` — binary wire frames (opcodes 0x01–0x0B) over WebTransport.
 //! * `relay` — WebTransport endpoint, session handling and broadcast relay.
-//! * `tui` — terminal UI: Server Info header, log stream, TOFU QR / fingerprint panel.
+//! * `ui` — terminal UI: Server Info header, log stream, TOFU QR / fingerprint panel.
 //! * `logging` — `tracing` → TUI / file bridge.
 
 pub mod cert;
@@ -17,7 +17,7 @@ pub mod logging;
 pub mod protocol;
 pub mod relay;
 pub mod storage;
-pub mod tui;
+pub mod ui;
 
 #[cfg(test)]
 mod tests;
@@ -30,7 +30,7 @@ use tokio::sync::Notify;
 use crate::cert::CertManager;
 use crate::config::AppConfig;
 use crate::logging::DEFAULT_LOG_FILTER;
-use crate::tui::CertView;
+use crate::ui::view::CertView;
 
 /// High-level entry point used by `main.rs`.
 ///
@@ -56,7 +56,7 @@ pub async fn run(app_config: AppConfig, shutdown: Arc<Notify>) -> Result<()> {
     let tofu_payload = cert_view.tofu_qr_string();
 
     // Spawn the TUI thread; it returns a handle to push logs and cert views.
-    let tui = tui::spawn_tui(cert_view, shutdown.clone())?;
+    let tui = ui::spawn_tui(cert_view, shutdown.clone())?;
 
     // Route tracing output into the TUI + rotating log file.
     let env_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| DEFAULT_LOG_FILTER.to_string());

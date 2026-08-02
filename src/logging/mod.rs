@@ -10,7 +10,7 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use crate::tui::TuiHandle;
+use crate::ui::TuiHandle;
 
 /// A `tracing`-style timer that formats the timestamp as `[HH:MM:SS]` for the
 /// stderr/log file layer (mirrors the TUI log styling).
@@ -52,7 +52,7 @@ impl<S: tracing::Subscriber> Layer<S> for TuiLogLayer {
 
         let timestamp = SystemTime::now();
 
-        self.tui.push_log(crate::tui::LogRecord {
+        self.tui.push_log(crate::ui::view::LogRecord {
             level,
             target,
             message,

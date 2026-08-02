@@ -210,6 +210,7 @@ impl RelayServer {
         self.sessions.insert(session_key, meta);
         self.stats.bump_sessions();
         self.tui.set_stats(self.sessions.len(), self.store.len());
+        self.tui.set_sessions(self.session_rows());
 
         // Task: forward broadcast messages AND direct responses to this session's send stream.
         let mut writer_task = tokio::spawn(async move {
@@ -490,6 +491,7 @@ impl RelayServer {
         self.auth_attempts.remove(&session_key);
         self.key_exchange_store.remove(&session_key);
         self.tui.set_stats(self.sessions.len(), self.store.len());
+        self.tui.set_sessions(self.session_rows());
         info!(
             "[SESSION] Session {} cleanup complete, remaining sessions={}",
             session_key,

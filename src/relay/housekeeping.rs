@@ -57,7 +57,7 @@ impl RelayServer {
                         let has_previous = cm.previous().is_some();
                         (cert, has_previous)
                     };
-                    let mut view = crate::tui::CertView::from_cert(&cert);
+                    let mut view = crate::ui::view::CertView::from_cert(&cert);
                     view.rotating = has_previous;
                     self.tui.set_cert(view);
                     info!(
@@ -93,6 +93,7 @@ impl RelayServer {
                 self.stats.sessions.store(sessions, Ordering::Relaxed);
                 self.stats.messages.store(messages, Ordering::Relaxed);
                 self.tui.set_stats(sessions, messages);
+                self.tui.set_sessions(self.session_rows());
             }
         });
     }
