@@ -5,8 +5,9 @@
 //! auth flag that the reader task flips on success.
 
 use std::net::IpAddr;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -38,6 +39,63 @@ pub struct Session {
 impl Session {
     pub fn new(key: u64, ip: IpAddr) -> Self {
         Self { key, ip, authenticated: false }
+    }
+}
+
+/// Owns the reader task's buffered bytes and reconciles the shared aggregate
+/// budget counter (`stats.buffered_bytes`) when dropped.
+///
+/// The reader task reconciles its residual buffer on the normal exit paths,
+/// but when the task is aborted (e.g. the writer task finishes first with a
+/// write/flush error, Bug 1) the future is dropped without running that
+/// cleanup, which previously leaked the remaining bytes from the DoS budget
+/// counter forever. Dropping a task's captured state runs `Drop`, so this
+/// wrapper covers every exit path — natural EOF, read error, idle timeout,
+/// oversized payload, and abort — returning the counter to its pre-session
+/// value.
+struct BudgetedBuffer<'a> {
+    buf: Vec<u8>,
+    budget: &'a AtomicUsize,
+}
+
+impl<'a> BudgetedBuffer<'a> {
+    fn new(budget: &'a AtomicUsize) -> Self {
+        Self {
+            buf: Vec::with_capacity(4096),
+            budget,
+        }
+    }
+
+    /// Return the remaining bytes to the budget counter now and clear the
+    /// buffer, so the subsequent `Drop` has nothing left to subtract. Keeps
+    /// the normal end-of-loop cleanup prompt and prevents double subtraction.
+    fn reconcile(&mut self) {
+        if !self.buf.is_empty() {
+            self.budget.fetch_sub(self.buf.len(), Ordering::Relaxed);
+            self.buf.clear();
+        }
+    }
+}
+
+impl Deref for BudgetedBuffer<'_> {
+    type Target = Vec<u8>;
+
+    fn deref(&self) -> &Vec<u8> {
+        &self.buf
+    }
+}
+
+impl DerefMut for BudgetedBuffer<'_> {
+    fn deref_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.buf
+    }
+}
+
+impl Drop for BudgetedBuffer<'_> {
+    fn drop(&mut self) {
+        if !self.buf.is_empty() {
+            self.budget.fetch_sub(self.buf.len(), Ordering::Relaxed);
+        }
     }
 }
 
@@ -263,7 +321,7 @@ impl RelayServer {
             let mut session = Session::new(session_key, remote_ip);
             tokio::spawn(async move {
                 info!("[READER] Session {} reader task started", session_key);
-                let mut buf: Vec<u8> = Vec::with_capacity(4096);
+                let mut buf = BudgetedBuffer::new(&this.stats.buffered_bytes);
                 let mut chunk = [0u8; 8192];
 
                 loop {
@@ -285,7 +343,8 @@ impl RelayServer {
                             if new_total > MAX_TOTAL_BUFFERED_BYTES {
                                 // Roll back: remove the bytes we just added.
                                 let rollback = buf.len().min(n);
-                                buf.truncate(buf.len() - rollback);
+                                let remaining = buf.len() - rollback;
+                                buf.truncate(remaining);
                                 this.stats.buffered_bytes.fetch_sub(rollback, Ordering::Relaxed);
                                 warn!(
                                     "[READER] Session {} AGGREGATE MEMORY BUDGET EXCEEDED ({} > {}), closing",
@@ -400,9 +459,9 @@ impl RelayServer {
                     }
                 }
                 // Release any remaining buffered bytes from the aggregate budget.
-                if !buf.is_empty() {
-                    this.stats.buffered_bytes.fetch_sub(buf.len(), Ordering::Relaxed);
-                }
+                // If this cleanup is never reached (task aborted), `Drop` on
+                // `BudgetedBuffer` reconciles the same bytes.
+                buf.reconcile();
                 info!(
                     "[READER] Session {} reader task ended (authenticated={})",
                     session_key, session.authenticated
@@ -441,9 +500,11 @@ impl RelayServer {
 
 #[cfg(test)]
 mod tests {
-    use super::SessionMeta;
+    use super::{BudgetedBuffer, SessionMeta};
     use std::net::IpAddr;
-    use std::time::Instant;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn session_meta_carries_auth_flag() {
@@ -455,5 +516,52 @@ mod tests {
         assert!(!m.authenticated);
         m.authenticated = true;
         assert!(m.authenticated);
+    }
+
+    #[test]
+    fn reconcile_then_drop_does_not_double_subtract() {
+        let budget = AtomicUsize::new(0);
+        {
+            let mut buf = BudgetedBuffer::new(&budget);
+            buf.extend_from_slice(&[0u8; 32]);
+            budget.fetch_add(32, Ordering::Relaxed);
+
+            buf.reconcile();
+            assert_eq!(budget.load(Ordering::Relaxed), 0);
+        }
+        assert_eq!(budget.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn buffered_bytes_reconciled_when_reader_task_aborted() {
+        let budget = Arc::new(AtomicUsize::new(0));
+        let pre = budget.load(Ordering::Relaxed);
+
+        // Reader task buffers a chunk (counted into the aggregate budget) and
+        // then blocks awaiting the next read — it never runs its end-of-loop
+        // cleanup. Mirrors a reader task killed mid-session by abort.
+        let reader = {
+            let budget = budget.clone();
+            tokio::spawn(async move {
+                let mut buf = BudgetedBuffer::new(&budget);
+                buf.extend_from_slice(&[0u8; 1024]);
+                budget.fetch_add(1024, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            })
+        };
+
+        // Yield until the reader has accounted its buffered bytes.
+        loop {
+            if budget.load(Ordering::Relaxed) == 1024 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        // Abort as run_session does when the writer finishes first.
+        reader.abort();
+        let _ = reader.await;
+
+        assert_eq!(budget.load(Ordering::Relaxed), pre);
     }
 }
