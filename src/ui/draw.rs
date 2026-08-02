@@ -1,7 +1,7 @@
 //! TUI rendering: layout, panels, log viewport, QR, status bar.
 //!
 //! Layout (full, ≥ ~90 cols × ~26 rows):
-//!   Server | Sessions    (left / right-top)
+//!   Server | Sessions    (left / right-top, compact)
 //!   QR     | Logs        (left / right-bottom)
 //!   Cert   |
 //!   Status bar (full width)
@@ -168,9 +168,10 @@ pub(crate) fn draw(
             draw_logs(f, main_area, &filtered, state);
         } else {
             // Horizontal split: left (panels) | right (sessions + logs)
+            // Left column: Server info + QR + Cert (narrower to give more room for logs)
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(50), Constraint::Min(30)])
+                .constraints([Constraint::Length(40), Constraint::Min(30)])
                 .split(main_area);
 
             let left_area = cols[0];
@@ -180,7 +181,7 @@ pub(crate) fn draw(
             if state.panel_mode == PanelMode::Full {
                 let left_rows = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(7), Constraint::Min(8), Constraint::Min(6)])
+                    .constraints([Constraint::Length(6), Constraint::Min(7), Constraint::Min(5)])
                     .split(left_area);
                 draw_info(f, left_rows[0], info, stats);
                 draw_qr(f, left_rows[1], cert);
@@ -190,10 +191,10 @@ pub(crate) fn draw(
                 draw_qr(f, left_area, cert);
             }
 
-            // Right column: Sessions on top, Logs below
+            // Right column: Sessions (compact, top) + Logs (remaining space)
             let right_rows = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(5), Constraint::Min(5)])
+                .constraints([Constraint::Length(8), Constraint::Min(5)])
                 .split(right_area);
             draw_sessions(f, right_rows[0], sessions);
             draw_logs(f, right_rows[1], &filtered, state);

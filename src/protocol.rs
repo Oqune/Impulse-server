@@ -15,6 +15,7 @@
 //!   server → client: id (u64) + timestamp (u64) + len + payload.
 //! * `0x06` Heartbeat     — either direction: client timestamp (u64).
 //! * `0x07` NewCertHash   — server → client: 32 raw SHA-256 bytes + expiry (u64).
+//! * `0x08` Disconnect    — either direction: no payload.
 //! * `0x0B` AuthChallenge — server → client: 16-byte random nonce.
 //! * `0x0C` KeyExchangeKemDsa — either direction: combined KEM + DSA public keys.
 
@@ -32,6 +33,7 @@ pub enum Opcode {
     Data = 0x05,
     Heartbeat = 0x06,
     NewCertHash = 0x07,
+    Disconnect = 0x08,
     AuthChallenge = 0x0B,
     KeyExchangeKemDsa = 0x0C,
 }
@@ -47,6 +49,7 @@ impl Opcode {
             0x05 => Some(Opcode::Data),
             0x06 => Some(Opcode::Heartbeat),
             0x07 => Some(Opcode::NewCertHash),
+            0x08 => Some(Opcode::Disconnect),
             0x0B => Some(Opcode::AuthChallenge),
             0x0C => Some(Opcode::KeyExchangeKemDsa),
             _ => None,
@@ -68,6 +71,7 @@ impl Opcode {
             Opcode::Data => "Data",
             Opcode::Heartbeat => "Heartbeat",
             Opcode::NewCertHash => "NewCertHash",
+            Opcode::Disconnect => "Disconnect",
             Opcode::AuthChallenge => "AuthChallenge",
             Opcode::KeyExchangeKemDsa => "KeyExchangeKemDsa",
         }
