@@ -21,6 +21,7 @@ san = []
 # REQUIRED. Argon2id encoded password hash. The client sends the password
 # Argon2id-hashed; the server compares it directly against this value.
 # Generate with:
+#   impulse-server --init            # interactive wizard (writes config.toml)
 #   impulse-server --hash-password <password>
-# IMPORTANT: replace this placeholder (it is a real hash of "changeme").
-password_hash = "$argon2id$v=19$m=19456,t=2,p=1$09ZyMveZKFvU72Y1d+HK4A$RHTplW58qDd8WgZKLqnWs7MrnFS3ycb9cLIFiMJI7+s"
+# Empty (or unset) = the server refuses to start until configured.
+password_hash = ""
