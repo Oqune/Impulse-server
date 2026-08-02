@@ -92,7 +92,6 @@ jobs:
           mkdir -p pkg/ImpulseServer-${{ matrix.arch }}
           cp target/${{ matrix.target }}/release/impulse-server pkg/ImpulseServer-${{ matrix.arch }}/impulse-server
           cp LICENSE pkg/ImpulseServer-${{ matrix.arch }}/
-          cp config.toml.example pkg/ImpulseServer-${{ matrix.arch }}/
           tar -C pkg -czf ImpulseServer-$VERSION-linux-${{ matrix.arch }}.tar.gz ImpulseServer-${{ matrix.arch }}
 
       - name: Package (Windows zip)
@@ -103,7 +102,6 @@ jobs:
           New-Item -ItemType Directory -Force $dir | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/impulse-server.exe" "$dir/impulse-server.exe"
           Copy-Item "LICENSE" "$dir/"
-          Copy-Item "config.toml.example" "$dir/"
           Compress-Archive -Path "$dir" -DestinationPath "ImpulseServer-$env:VERSION-windows-${{ matrix.arch }}.zip"
 
       - name: Upload artifact
