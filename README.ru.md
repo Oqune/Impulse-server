@@ -67,11 +67,29 @@ Impulse — это relay-сервер для end-to-end-encrypted мессенд
 
 ```bash
 cargo build --release
-./target/release/Impulse-server --config config.toml
-# или через CLI-флаги (переопределяют конфиг-файл):
-./target/release/Impulse-server --port 4433 --cert-dir cert_data \
-    --password-hash "$(./target/release/Impulse-server --hash-password yourpassword)"
+./target/release/Impulse-server
 ```
+
+При самом первом запуске (не найден `config.toml` и не передан
+`--password-hash`) сервер интерактивно запрашивает пароль клиента, записывает
+минимальный `config.toml` в текущий каталог и стартует с ним. Для явной
+настройки выполните:
+
+```bash
+./target/release/Impulse-server --init
+```
+
+`--init` запрашивает пароль и, опционально, адрес привязки, каталог
+сертификатов и дополнительные SAN, затем записывает `config.toml` (для
+перезаписи используйте `--force`). В средах без терминала (systemd, Docker)
+хэш пароля нужно настроить заранее — сервер отказывается стартовать без него:
+
+```bash
+./target/release/Impulse-server --hash-password yourpassword
+```
+
+CLI-флаги всегда переопределяют конфиг-файл; `--license` выводит текст
+лицензии MIT.
 
 | Флаг | Короткий | Описание | По умолчанию |
 |------|----------|----------|-------------|
@@ -81,18 +99,13 @@ cargo build --release
 | `--san` | | Дополнительный SAN (DNS или IP) для самоподписанного сертификата (повторяемый) | _нет_ |
 | `--password-hash` | | Argon2id хэш пароля клиента (обязателен) | _нет_ |
 | `--config` | | Путь к TOML-конфигу; авто-поиск `config.toml` в рабочем каталоге, затем рядом с исполняемым файлом | авто-поиск |
+| `--init` | | Интерактивно создать `config.toml` (пароль, адрес, SAN), затем выйти | _нет_ |
+| `--force` | | Перезаписать существующий `config.toml` при использовании с `--init` | _нет_ |
+| `--license` | | Вывести текст лицензии MIT и выйти | _нет_ |
 
 `password_hash` **обязателен** — небезопасного значения по умолчанию нет.
-Сгенерируйте встроенным хелпером:
-
-```bash
-./target/release/Impulse-server --hash-password yourpassword
-```
-
-При старте сервер выводит `Using config file: <путь>`, если конфиг загружен.
-Конфиг, заданный явно (`--config`) или найденный автоматически, но не читаемый
-или не парсящийся — фатальная ошибка запуска: сервер никогда не откатывается
-к значениям по умолчанию молча.
+Настройте его через `--init` (интерактивно), `--password-hash <hash>` или
+`server.password_hash` в `config.toml`.
 
 ## Продакшен-развёртывание
 
@@ -105,7 +118,7 @@ cargo build --release
 
 ### Рекомендуемые флаги запуска
 
-В продакшене используйте `RUST_LOG=info` или `RUST_LOG=warn`, чтобы избежать лишнего I/O от hex-дампа в debug-режиме:
+В продакшене используйте `RUST_LOG=info` или `RUST_LOG=warn`, чтобы избежать лишнего I/O от hex-дампа в debug-режиме. Фильтр `RUST_LOG` теперь применяется и к потоку логов в TUI:
 
 ```bash
 RUST_LOG=info ./target/release/Impulse-server --config config.toml
@@ -219,6 +232,8 @@ GitHub Release; `.deb` и `.rpm` пакеты собираются для Linux 
 Артефакты релиза используют единую схему имён `ImpulseServer-<version>-<os>-<arch>.<ext>`
 (например, `ImpulseServer-2.5.0-linux-amd64.tar.gz`, `ImpulseServer-2.5.0-windows-arm64.zip`,
 `ImpulseServer-2.5.0-linux-arm64.deb`, `ImpulseServer-2.5.0-linux-arm64.rpm`).
+Архивы `.tar.gz`/`.zip` содержат только бинарник и файл `LICENSE` — конфиг
+создаётся при первом запуске или через `--init`.
 
 ### Требования
 

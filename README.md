@@ -64,11 +64,27 @@ Key design points:
 
 ```bash
 cargo build --release
-./target/release/Impulse-server --config config.toml
-# or with CLI flags (which override the config file):
-./target/release/Impulse-server --port 4433 --cert-dir cert_data \
-    --password-hash "$(./target/release/Impulse-server --hash-password yourpassword)"
+./target/release/Impulse-server
 ```
+
+On the very first launch (no `config.toml` found and no `--password-hash`), the
+server asks for a client password interactively, writes a minimal `config.toml`
+to the current directory, and starts with it. For explicit setup, run:
+
+```bash
+./target/release/Impulse-server --init
+```
+
+`--init` prompts for the password and, optionally, the bind address, cert
+directory, and extra SANs, then writes `config.toml` (use `--force` to
+overwrite). Headless environments (systemd, Docker) must configure the password
+hash beforehand — the server refuses to start without one:
+
+```bash
+./target/release/Impulse-server --hash-password yourpassword
+```
+
+CLI flags always override the config file; `--license` prints the MIT license.
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
@@ -78,18 +94,13 @@ cargo build --release
 | `--san` | | Extra SAN (DNS name or IP) for the self-signed cert (repeatable) | _none_ |
 | `--password-hash` | | Argon2id encoded hash of the client password (required) | _none_ |
 | `--config` | | Path to a TOML config file; auto-discovered as `config.toml` in the working directory, then next to the executable | auto-discover |
+| `--init` | | Interactively create `config.toml` (password, address, SANs), then exit | _none_ |
+| `--force` | | Overwrite an existing `config.toml` when used with `--init` | _none_ |
+| `--license` | | Print the MIT license text and exit | _none_ |
 
-`password_hash` is **required** — there is no insecure default. Generate an
-Argon2id hash with the built-in helper:
-
-```bash
-./target/release/Impulse-server --hash-password yourpassword
-```
-
-The server prints `Using config file: <path>` at startup when a config file is
-loaded. A config file that is explicitly requested (`--config`) or discovered
-but cannot be read or parsed is a fatal startup error — the server never
-silently falls back to defaults.
+`password_hash` is **required** — there is no insecure default. Configure it
+with `--init` (interactive), `--password-hash <hash>`, or `server.password_hash`
+in `config.toml`.
 
 ## Production deployment
 
@@ -107,7 +118,8 @@ silently falls back to defaults.
 ### Recommended runtime flags
 
 For production, run with `RUST_LOG=info` or `RUST_LOG=warn` to avoid excessive
-I/O from debug-level hex dumps (raw chunk data is logged at DEBUG level):
+I/O from debug-level hex dumps (raw chunk data is logged at DEBUG level). The
+`RUST_LOG` filter now applies to the TUI log stream as well:
 
 ```bash
 RUST_LOG=info ./target/release/Impulse-server --config config.toml
@@ -221,6 +233,8 @@ GitHub Release; `.deb` and `.rpm` packages are built for Linux x86-64 and ARM64.
 Release artifacts follow the unified naming scheme `ImpulseServer-<version>-<os>-<arch>.<ext>`
 (e.g. `ImpulseServer-2.5.0-linux-amd64.tar.gz`, `ImpulseServer-2.5.0-windows-arm64.zip`,
 `ImpulseServer-2.5.0-linux-arm64.deb`, `ImpulseServer-2.5.0-linux-arm64.rpm`).
+The `.tar.gz`/`.zip` archives contain the binary and `LICENSE` only — the config
+is created on first run or via `--init`.
 
 ### Requirements
 
