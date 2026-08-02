@@ -31,6 +31,17 @@ use crate::cert::Cert;
 /// Max number of log lines retained for the TUI.
 const MAX_LOG_LINES: usize = 500;
 
+/// Single source of truth for log-level → (color, short label).
+fn level_style(level: Level) -> (Color, &'static str) {
+    match level {
+        Level::ERROR => (Color::Red, "ERR"),
+        Level::WARN => (Color::Yellow, "WRN"),
+        Level::INFO => (Color::Cyan, "INF"),
+        Level::DEBUG => (Color::Magenta, "DBG"),
+        Level::TRACE => (Color::DarkGray, "TRC"),
+    }
+}
+
 /// Mutable TUI state for scrolling and log filtering.
 struct TuiState {
     /// Current scroll offset (lines from bottom). 0 = pinned to bottom.
@@ -360,24 +371,25 @@ fn draw_help_bar(
 
     // Filter indicators — colored pills showing which levels are on
     let all_active = state.active_filters.is_empty();
-    let filter_defs: &[(Level, &str, Color)] = &[
-        (Level::TRACE, "1:TRC", Color::DarkGray),
-        (Level::DEBUG, "2:DBG", Color::Magenta),
-        (Level::INFO, "3:INF", Color::Cyan),
-        (Level::WARN, "4:WRN", Color::Yellow),
-        (Level::ERROR, "5:ERR", Color::Red),
+    let filter_keys: &[(Level, &str)] = &[
+        (Level::TRACE, "1"),
+        (Level::DEBUG, "2"),
+        (Level::INFO, "3"),
+        (Level::WARN, "4"),
+        (Level::ERROR, "5"),
     ];
 
     spans.push(Span::styled(" Filters: ", Style::default().fg(Color::Gray)));
 
-    for (level, label, color) in filter_defs {
+    for (level, key) in filter_keys {
+        let (color, short) = level_style(*level);
         let active = all_active || state.active_filters.contains(level);
         let style = if active {
-            Style::default().fg(*color).add_modifier(Modifier::BOLD)
+            Style::default().fg(color).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        spans.push(Span::styled(format!("[{}]", label), style));
+        spans.push(Span::styled(format!("[{key}:{short}]"), style));
         spans.push(Span::raw(" "));
     }
 
@@ -494,6 +506,10 @@ fn draw_info(
             Span::raw(info.version.clone()),
         ]),
         Line::from(vec![
+            Span::styled("License: ", Style::default().fg(Color::Gray)),
+            Span::styled("MIT © oqune", Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![
             Span::styled("Sessions: ", Style::default().fg(Color::Gray)),
             Span::raw(format!("{}/{}", stats.0, info.max_sessions)),
             Span::styled("  Msgs: ", Style::default().fg(Color::Gray)),
@@ -544,20 +560,7 @@ fn draw_logs(f: &mut ratatui::Frame, area: Rect, filtered: &[&LogRecord], state:
     let lines: Vec<Line> = filtered
         .iter()
         .map(|rec| {
-            let color = match rec.level {
-                Level::ERROR => Color::Red,
-                Level::WARN => Color::Yellow,
-                Level::INFO => Color::Cyan,
-                Level::DEBUG => Color::Magenta,
-                Level::TRACE => Color::DarkGray,
-            };
-            let lvl = match rec.level {
-                Level::ERROR => "ERR",
-                Level::WARN => "WRN",
-                Level::INFO => "INF",
-                Level::DEBUG => "DBG",
-                Level::TRACE => "TRC",
-            };
+            let (color, lvl) = level_style(rec.level);
             let ts_str = format_timestamp(rec.timestamp);
 
             Line::from(vec![
@@ -612,13 +615,7 @@ fn copy_logs_to_clipboard(logs: &[LogRecord], clipboard: &mut Option<ClipboardCo
             .iter()
             .map(|rec| {
                 let ts_str = format_timestamp(rec.timestamp);
-                let lvl = match rec.level {
-                    Level::ERROR => "ERR",
-                    Level::WARN => "WRN",
-                    Level::INFO => "INF",
-                    Level::DEBUG => "DBG",
-                    Level::TRACE => "TRC",
-                };
+                let (_, lvl) = level_style(rec.level);
                 format!("{} [{}] {}: {}", ts_str, lvl, rec.target, rec.message)
             })
             .collect::<Vec<_>>()
