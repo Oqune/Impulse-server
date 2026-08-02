@@ -72,13 +72,13 @@ pub struct ServerSettings {
     #[serde(default = "default_address_v4")]
     pub address: String,
     /// IPv6 bind address, e.g. `[::]:4433`. Empty string = disabled.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub address6: String,
     /// Directory where the self-signed certificate + key are persisted.
     #[serde(default = "default_cert_dir")]
     pub cert_dir: String,
     /// Extra Subject Alternative Names for the certificate.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub san: Vec<String>,
     /// Password hash for authentication (Argon2id encoded). Required at
     /// startup; may be supplied via config, `--password-hash`, or generated

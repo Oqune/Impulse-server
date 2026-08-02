@@ -68,6 +68,9 @@ hmac = "0.12"
 # Argon2id for password hashing (--hash-password CLI)
 argon2 = "0.5"
 
+# Hidden password input for --init / first-run wizard
+rpassword = "7"
+
 # CLI + config
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"

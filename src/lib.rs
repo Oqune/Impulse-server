@@ -14,6 +14,7 @@ pub mod config;
 pub mod logging;
 pub mod protocol;
 pub mod server;
+pub mod setup;
 pub mod storage;
 pub mod tui;
 
