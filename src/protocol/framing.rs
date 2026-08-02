@@ -2,7 +2,7 @@
 //!
 //! `try_read_packet` inspects a byte buffer and reports whether a complete,
 //! well-formed packet is available, how long it is, or why it must be skipped /
-//! the session closed. Moved here from `server.rs` so the codec has no
+//! the session closed. This standalone module keeps the codec free of a
 //! dependency on the relay.
 
 use crate::protocol::limits::MAX_PACKET_LEN;

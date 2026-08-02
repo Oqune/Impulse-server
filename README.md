@@ -56,8 +56,10 @@ Key design points:
     size, certificate SHA-256 fingerprint (short), cert expiry countdown, a
     ⚠ rotating indicator during key overlap, and a scannable QR code.
   - **Right column** (Help bar + Logs): live server log stream with level
-    filtering (`1`–`5` keys), scroll (`↑↓`/`PgUp`/`PgDn`/`Home`/`End`),
-    and `Shift+C` to copy all logs to clipboard.
+    filters `1`–`5` (ERR/WRN/INF/DBG/TRC), scroll (`↑↓`/`PgUp`/`PgDn`/`Home`/`End`
+    or mouse wheel), search (`/`), `Space` to pause, and `Shift+C` to copy all
+    logs to clipboard. `Tab` cycles Server/Sessions panels; `f` focuses the QR
+    code. The status bar shows live throughput, uptime, active filters and hints.
   `Ctrl+C` / `q` quits and shuts down gracefully.
 
 ## Build & run
@@ -305,16 +307,17 @@ written to `logs/` with daily rotation and 7-day retention.
 
 ```
 src/
-  cert.rs      — ECDSA P-256 cert generation, rotation, SHA-256 TOFU fingerprint, FS persist
-  storage.rs   — ephemeral in-RAM message log (TTL 72h, sequence ids)
-  protocol.rs  — binary wire frames (opcodes 0x01–0x0C)
-  server.rs    — WebTransport endpoint, session handling, broadcast relay
-  tui.rs       — terminal UI: Server Info header, log stream, TOFU QR / fingerprint panel
-  logging.rs   — tracing → TUI / rolling file bridge
-  config.rs    — CLI + config.toml loading
+  cert/        — ECDSA P-256 cert generation, rotation, SHA-256 TOFU fingerprint, FS persist
+  storage/     — ephemeral in-RAM message log (TTL 72h, sequence ids)
+  protocol.rs  — binary wire frames; framing/limits live in protocol/
+  relay/       — WebTransport endpoint, session handling, auth and broadcast relay
+  ui/          — terminal UI: Server/Sessions panels, logs, TOFU QR and live stats
+  logging/     — tracing → TUI / rolling file bridge
+  config/      — CLI parsing and config.toml loading
+  cli/         — first-run and --init wizards, config writer
   lib.rs       — wiring + run() entry point
   main.rs      — binary entry point
-  tests.rs     — unit tests (protocol + storage)
+tests/         — integration tests (handshake, relay, config, storage)
 ```
 
 ## License

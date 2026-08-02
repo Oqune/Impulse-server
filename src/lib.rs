@@ -4,9 +4,15 @@
 //! * `cert` — self-signed ECDSA P-256 certificate generation, 14-day TTL,
 //!   2-day overlap rotation, SHA-256 TOFU fingerprint.
 //! * `storage` — ephemeral in-RAM message log with 72h TTL and sequence ids.
-//! * `protocol` — binary wire frames (opcodes 0x01–0x0B) over WebTransport.
-//! * `relay` — WebTransport endpoint, session handling and broadcast relay.
-//! * `ui` — terminal UI: Server Info header, log stream, TOFU QR / fingerprint panel.
+//! * `protocol` — binary wire frames (opcodes 0x01–0x0C) over WebTransport;
+//!   framing and size limits live in `protocol::framing` / `protocol::limits`.
+//! * `crypto` — Argon2id password hashing + verification (auth chain).
+//! * `relay` — WebTransport endpoint, session handling, broadcast relay,
+//!   auth handshake (`relay::auth`), and housekeeping (`relay::housekeeping`).
+//! * `ui` — terminal UI: Server/Sessions panels, TOFU QR, live stats, log view.
+//! * `config` — configuration resolution (`mod`), CLI parsing (`cli`), file
+//!   loading (`file`).
+//! * `cli` — first-run / `--init` interactive wizards and config writing.
 //! * `logging` — `tracing` → TUI / file bridge.
 
 pub mod cert;
