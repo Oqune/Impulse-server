@@ -10,12 +10,12 @@
 //! * `logging` — `tracing` → TUI / file bridge.
 
 pub mod cert;
+pub mod cli;
 pub mod config;
 pub mod crypto;
 pub mod logging;
 pub mod protocol;
 pub mod relay;
-pub mod setup;
 pub mod storage;
 pub mod tui;
 
@@ -29,6 +29,7 @@ use tokio::sync::Notify;
 
 use crate::cert::CertManager;
 use crate::config::AppConfig;
+use crate::logging::DEFAULT_LOG_FILTER;
 use crate::tui::CertView;
 
 /// High-level entry point used by `main.rs`.
@@ -58,7 +59,7 @@ pub async fn run(app_config: AppConfig, shutdown: Arc<Notify>) -> Result<()> {
     let tui = tui::spawn_tui(cert_view, shutdown.clone())?;
 
     // Route tracing output into the TUI + rotating log file.
-    let env_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "debug".to_string());
+    let env_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| DEFAULT_LOG_FILTER.to_string());
     logging::init_tracing(tui.clone(), &env_filter);
 
     // Log the TOFU payload — it can be copied into the client's manual entry

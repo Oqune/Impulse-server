@@ -1893,7 +1893,8 @@ mod e2e_integration_tests {
 
 #[cfg(test)]
 mod config_tests {
-    use crate::config::{CliArgs, SetupCommand, load_config, resolve_command};
+    use crate::config::cli::{CliArgs, SetupCommand, resolve_command};
+    use crate::config::load_config;
     use clap::{CommandFactory, Parser};
 
     #[test]
@@ -2062,7 +2063,7 @@ mod config_tests {
 
 mod setup_tests {
     use crate::config::AppConfig;
-    use crate::setup::write_config_file;
+    use crate::cli::write_config_file;
 
     const TEST_HASH: &str = "$argon2id$v=19$m=47104,t=3,p=1$ZU3OGIF2VhIrUVb19y2izg$7njBEf6KUZtU/sC4HSVFti9DFEC3Mkwqd+uQsUqBAUc";
 

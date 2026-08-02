@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
-use impulse_server::config::{CliArgs, config_file_loaded, load_config, resolve_command, SetupCommand};
+use impulse_server::cli::{LICENSE_TEXT, run_first_run_wizard, run_init_wizard};
+use impulse_server::config::cli::{CliArgs, resolve_command, SetupCommand};
+use impulse_server::config::{config_file_loaded, load_config};
 use impulse_server::crypto::argon2_hash;
-use impulse_server::setup::{LICENSE_TEXT, run_first_run_wizard, run_init_wizard};
 use impulse_server::run;
 use tokio::sync::Notify;
 

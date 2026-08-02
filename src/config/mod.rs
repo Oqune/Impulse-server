@@ -10,110 +10,13 @@
 //! or parsed is a fatal error — the server never silently falls back to
 //! defaults, so a misconfiguration surfaces immediately at startup.
 
-use clap::Parser;
+pub mod cli;
+pub mod file;
+
+pub use cli::{CliArgs, SetupCommand, resolve_command};
+pub use file::{config_file_loaded, load_file_config, resolve_config_path};
+
 use serde::{Deserialize, Serialize};
-
-#[derive(Parser, Debug, Clone)]
-#[command(name = "impulse-server")]
-#[command(about = "Secure ephemeral messenger server over WebTransport (QUIC)")]
-pub struct CliArgs {
-    #[arg(
-        long,
-        help = "IPv4 bind address (overrides `server.address` in the config file)"
-    )]
-    pub host: Option<String>,
-
-    #[arg(
-        long,
-        help = "IPv6 bind address (e.g. [::]). Enables dual-stack when set."
-    )]
-    pub host6: Option<String>,
-
-    #[arg(
-        short,
-        long,
-        help = "WebTransport (QUIC) listen port (overrides the port in the config file)"
-    )]
-    pub port: Option<u16>,
-
-    #[arg(
-        long,
-        help = "Directory to store the generated certificate/key"
-    )]
-    pub cert_dir: Option<String>,
-
-    #[arg(
-        long,
-        num_args = 0..,
-        help = "Extra SAN (DNS name or IP) for the generated self-signed certificate"
-    )]
-    pub san: Vec<String>,
-
-    #[arg(
-        long,
-        help = "Password hash for authentication (Argon2id encoded string)"
-    )]
-    pub password_hash: Option<String>,
-
-    #[arg(
-        long,
-        help = "Compute Argon2id hash of a password (prints to stdout and exits)"
-    )]
-    pub hash_password: Option<String>,
-
-    #[arg(
-        long,
-        help = "Interactively create a config.toml (prompts for password, address, certificate directory, SANs) and exit"
-    )]
-    pub init: bool,
-
-    #[arg(
-        long,
-        help = "Overwrite an existing config.toml when used with --init"
-    )]
-    pub force: bool,
-
-    #[arg(long, help = "Print the MIT license text and exit")]
-    pub license: bool,
-
-    #[arg(long, help = "Path to a TOML config file")]
-    pub config: Option<String>,
-}
-
-/// One-shot commands that exit before the server starts.
-#[derive(Debug, PartialEq, Eq)]
-pub enum SetupCommand {
-    /// Normal run: start the relay.
-    Run,
-    /// `--hash-password <pw>`: print an Argon2id hash and exit.
-    HashPassword(String),
-    /// `--license`: print the MIT license text and exit.
-    PrintLicense,
-    /// `--init`: run the interactive setup wizard and exit.
-    Init,
-}
-
-/// Resolve the one-shot command from CLI flags, rejecting combinations.
-pub fn resolve_command(cli: &CliArgs) -> anyhow::Result<SetupCommand> {
-    let count =
-        usize::from(cli.license) + usize::from(cli.init) + usize::from(cli.hash_password.is_some());
-    if count > 1 {
-        anyhow::bail!("--license, --init, and --hash-password are mutually exclusive");
-    }
-    if cli.force && !cli.init {
-        anyhow::bail!("--force requires --init");
-    }
-    if cli.license {
-        return Ok(SetupCommand::PrintLicense);
-    }
-    if cli.init {
-        return Ok(SetupCommand::Init);
-    }
-    if let Some(pw) = &cli.hash_password {
-        return Ok(SetupCommand::HashPassword(pw.clone()));
-    }
-    Ok(SetupCommand::Run)
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -281,69 +184,4 @@ pub fn current_port(address: &str) -> u16 {
     after
         .and_then(|p| p.trim_start_matches(':').parse().ok())
         .unwrap_or(4433)
-}
-
-/// Resolve the config file path to try: explicit `--config`, or auto-discovery
-/// in the current directory, then next to the executable.
-/// `Ok(None)` means "no config file found" (only possible without `--config`).
-fn resolve_config_path(path: Option<&str>) -> anyhow::Result<Option<std::path::PathBuf>> {
-    match path {
-        Some(p) => Ok(Some(std::path::PathBuf::from(p))),
-        None => {
-            let cwd = std::env::current_dir().ok().map(|d| d.join("config.toml"));
-            if let Some(c) = cwd.as_ref() && c.exists() {
-                Ok(Some(c.clone()))
-            } else if let Some(exe_dir) = std::env::current_exe().ok()
-                .and_then(|e| e.parent().map(|p| p.to_path_buf()))
-            {
-                let candidate = exe_dir.join("config.toml");
-                if candidate.exists() {
-                    Ok(Some(candidate))
-                } else {
-                    Ok(None)
-                }
-            } else {
-                Ok(None)
-            }
-        }
-    }
-}
-
-/// Whether a config file was explicitly requested or auto-discovered.
-/// An explicit `--config` counts as loaded even if missing — `load_config`
-/// reports the missing-file error. Used to decide if the first-run wizard runs.
-pub fn config_file_loaded(cli_args: &CliArgs) -> bool {
-    if cli_args.config.is_some() {
-        return true;
-    }
-    resolve_config_path(None).map(|p| p.is_some()).unwrap_or(false)
-}
-
-/// Load `config.toml` from `--config <path>`, or auto-discover it in the
-/// current directory and next to the executable.
-///
-/// An explicit path that cannot be read, or any discovered file that cannot be
-/// parsed, is a fatal error (the server never silently falls back to defaults).
-/// `Ok(None)` means "no config file found" and is only returned when no
-/// `--config` was given and neither candidate exists.
-fn load_file_config(path: Option<&str>) -> anyhow::Result<Option<AppConfig>> {
-    let path = match resolve_config_path(path)? {
-        Some(p) => p,
-        None => return Ok(None),
-    };
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) => {
-            anyhow::bail!("could not read config file {}: {}", path.display(), e);
-        }
-    };
-    match toml::from_str(&text) {
-        Ok(config) => {
-            eprintln!("Using config file: {}", path.display());
-            Ok(Some(config))
-        }
-        Err(e) => {
-            anyhow::bail!("could not parse config file {}: {}", path.display(), e);
-        }
-    }
 }
