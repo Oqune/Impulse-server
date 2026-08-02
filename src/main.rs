@@ -1,14 +1,43 @@
+use std::io::IsTerminal;
 use std::sync::Arc;
 
+use anyhow::Result;
 use clap::Parser;
-use impulse_server::config::{AppConfig, CliArgs, load_config};
+use impulse_server::config::{CliArgs, argon2_hash, config_file_loaded, load_config, resolve_command, SetupCommand};
+use impulse_server::setup::{LICENSE_TEXT, run_first_run_wizard, run_init_wizard};
 use impulse_server::run;
 use tokio::sync::Notify;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     let cli = CliArgs::parse();
-    let app_config: AppConfig = load_config(&cli)?;
+
+    // One-shot commands that exit before the server starts.
+    match resolve_command(&cli)? {
+        SetupCommand::HashPassword(pw) => {
+            println!("{}", argon2_hash(&pw));
+            return Ok(());
+        }
+        SetupCommand::PrintLicense => {
+            print!("{}", LICENSE_TEXT);
+            return Ok(());
+        }
+        SetupCommand::Init => {
+            run_init_wizard(cli.force)?;
+            return Ok(());
+        }
+        SetupCommand::Run => {}
+    }
+
+    // First-run onboarding: no config file and no hash, interactive terminal.
+    if !config_file_loaded(&cli)
+        && cli.password_hash.is_none()
+        && std::io::stdin().is_terminal()
+    {
+        run_first_run_wizard()?;
+    }
+
+    let app_config = load_config(&cli)?;
 
     let shutdown = Arc::new(Notify::new());
 
