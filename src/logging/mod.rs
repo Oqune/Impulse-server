@@ -10,7 +10,7 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use crate::tui::TuiHandle;
+use crate::ui::TuiHandle;
 
 /// A `tracing`-style timer that formats the timestamp as `[HH:MM:SS]` for the
 /// stderr/log file layer (mirrors the TUI log styling).
@@ -52,7 +52,7 @@ impl<S: tracing::Subscriber> Layer<S> for TuiLogLayer {
 
         let timestamp = SystemTime::now();
 
-        self.tui.push_log(crate::tui::LogRecord {
+        self.tui.push_log(crate::ui::view::LogRecord {
             level,
             target,
             message,
@@ -76,17 +76,18 @@ impl<'a> tracing::field::Visit for MessageVisitor<'a> {
     }
 }
 
+/// Default filter when `RUST_LOG` is unset. Single source for both the TUI
+/// layer and the rolling file layer (Bug 6).
+pub const DEFAULT_LOG_FILTER: &str = "debug";
+
 /// Install the global tracing subscriber, sending events to the TUI and
 /// a rolling log file under `logs/`. The same `EnvFilter` gates both layers.
 /// Must be called once before logging.
 pub fn init_tracing(tui: TuiHandle, env_filter: &str) {
     let filter = tracing_subscriber::EnvFilter::try_new(env_filter)
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER));
 
     let tui_layer = TuiLogLayer { tui }.with_filter(filter.clone());
-
-    // Ensure the logs directory exists before creating the rolling file appender.
-    let _ = std::fs::create_dir_all("logs");
 
     use tracing_appender::rolling::{self, Rotation};
     let file_layer = match rolling::Builder::default()

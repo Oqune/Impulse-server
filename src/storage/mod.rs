@@ -57,11 +57,6 @@ impl MessageStore {
         }
     }
 
-    /// Allocate the next sequence id without storing yet.
-    fn alloc_id(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
-    }
-
     /// Append a message, returning the stored record (id + timestamp + payload).
     pub fn push(&self, payload: Vec<u8>) -> StoredMessage {
         let timestamp = SystemTime::now()
@@ -73,23 +68,29 @@ impl MessageStore {
 
     /// Core insertion used by [`push`]; also lets tests inject a fixed timestamp.
     pub(crate) fn push_with_timestamp(&self, payload: Vec<u8>, timestamp: u64) -> StoredMessage {
-        let id = self.alloc_id();
+        // Bug 2: allocate the id while holding the lock so the sequence observed
+        // in `order` (and returned by `since`) is strictly monotonic even under
+        // concurrent pushes. Previously `alloc_id` ran `fetch_add` outside the
+        // lock, so thread A could take id 5 and thread B id 6, then B enqueue
+        // before A → `since()` could return `[6,5]`.
+        let mut order = lock_order(&self.order);
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let msg = StoredMessage {
             id,
             payload,
             timestamp,
         };
-        {
-            let mut order = lock_order(&self.order);
-            self.inner.insert(id, msg.clone());
-            order.push_back(id);
-            while order.len() > MAX_MESSAGES {
-                if let Some(oldest) = order.front().copied() {
-                    order.pop_front();
-                    self.inner.remove(&oldest);
-                } else {
-                    break;
-                }
+        // `msg.clone()` (payload copy into the ring) is required to return the
+        // owned record while storing the same one — the relay reads stored
+        // records via `since()`, so the payload must live in the map.
+        self.inner.insert(id, msg.clone());
+        order.push_back(id);
+        while order.len() > MAX_MESSAGES {
+            if let Some(oldest) = order.front().copied() {
+                order.pop_front();
+                self.inner.remove(&oldest);
+            } else {
+                break;
             }
         }
         msg
@@ -140,5 +141,68 @@ impl MessageStore {
 
     pub fn len(&self) -> usize {
         self.inner.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    #[test]
+    fn sweep_removes_expired() {
+        let store = MessageStore::new();
+        store.push(vec![1]);
+
+        let expired_ts = now_ms() - (MESSAGE_TTL.as_millis() as u64) - 1000;
+        store.push_with_timestamp(vec![2], expired_ts);
+        assert_eq!(store.len(), 2);
+
+        let removed = store.sweep();
+        assert_eq!(removed, 1);
+        assert_eq!(store.len(), 1);
+
+        // MESSAGE_TTL must stay 72 hours for the compatibility tests.
+        assert_eq!(MESSAGE_TTL, Duration::from_secs(60 * 60 * 24 * 3));
+    }
+
+    #[test]
+    fn storage_ttl_boundary() {
+        let store = MessageStore::new();
+        let ttl_ms = MESSAGE_TTL.as_millis() as u64;
+        let now = now_ms();
+
+        // Exactly at the TTL minus one second: still alive.
+        store.push_with_timestamp(b"alive".to_vec(), now - (ttl_ms - 1000));
+        // One second past the TTL: dead.
+        store.push_with_timestamp(b"dead".to_vec(), now - (ttl_ms + 1000));
+        // Fresh.
+        store.push_with_timestamp(b"fresh".to_vec(), now - 1000);
+        assert_eq!(store.len(), 3);
+
+        let removed = store.sweep();
+        assert_eq!(removed, 1, "only the expired message should be removed");
+        assert_eq!(store.len(), 2, "two messages should remain");
+
+        let remaining = store.since(0, 10);
+        let payloads: Vec<&[u8]> = remaining.iter().map(|m| m.payload.as_slice()).collect();
+        assert!(
+            payloads.contains(&b"alive".as_slice()),
+            "alive should remain, got: {payloads:?}"
+        );
+        assert!(
+            payloads.contains(&b"fresh".as_slice()),
+            "fresh should remain, got: {payloads:?}"
+        );
+        assert!(
+            !payloads.contains(&b"dead".as_slice()),
+            "dead should have been swept, got: {payloads:?}"
+        );
     }
 }

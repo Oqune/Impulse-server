@@ -4,22 +4,26 @@
 //! * `cert` — self-signed ECDSA P-256 certificate generation, 14-day TTL,
 //!   2-day overlap rotation, SHA-256 TOFU fingerprint.
 //! * `storage` — ephemeral in-RAM message log with 72h TTL and sequence ids.
-//! * `protocol` — binary wire frames (opcodes 0x01–0x0B) over WebTransport.
-//! * `server` — WebTransport endpoint, session handling and broadcast relay.
-//! * `tui` — terminal UI: Server Info header, log stream, TOFU QR / fingerprint panel.
+//! * `protocol` — binary wire frames (opcodes 0x01–0x0C) over WebTransport;
+//!   framing and size limits live in `protocol::framing` / `protocol::limits`.
+//! * `crypto` — Argon2id password hashing + verification (auth chain).
+//! * `relay` — WebTransport endpoint, session handling, broadcast relay,
+//!   auth handshake (`relay::auth`), and housekeeping (`relay::housekeeping`).
+//! * `ui` — terminal UI: Server/Sessions panels, TOFU QR, live stats, log view.
+//! * `config` — configuration resolution (`mod`), CLI parsing (`cli`), file
+//!   loading (`file`).
+//! * `cli` — first-run / `--init` interactive wizards and config writing.
 //! * `logging` — `tracing` → TUI / file bridge.
 
 pub mod cert;
+pub mod cli;
 pub mod config;
+pub mod crypto;
 pub mod logging;
 pub mod protocol;
-pub mod server;
-pub mod setup;
+pub mod relay;
 pub mod storage;
-pub mod tui;
-
-#[cfg(test)]
-mod tests;
+pub mod ui;
 
 use std::sync::Arc;
 
@@ -28,7 +32,8 @@ use tokio::sync::Notify;
 
 use crate::cert::CertManager;
 use crate::config::AppConfig;
-use crate::tui::CertView;
+use crate::logging::DEFAULT_LOG_FILTER;
+use crate::ui::view::CertView;
 
 /// High-level entry point used by `main.rs`.
 ///
@@ -54,10 +59,10 @@ pub async fn run(app_config: AppConfig, shutdown: Arc<Notify>) -> Result<()> {
     let tofu_payload = cert_view.tofu_qr_string();
 
     // Spawn the TUI thread; it returns a handle to push logs and cert views.
-    let tui = tui::spawn_tui(cert_view, shutdown.clone())?;
+    let tui = ui::spawn_tui(cert_view, shutdown.clone())?;
 
     // Route tracing output into the TUI + rotating log file.
-    let env_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "debug".to_string());
+    let env_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| DEFAULT_LOG_FILTER.to_string());
     logging::init_tracing(tui.clone(), &env_filter);
 
     // Log the TOFU payload — it can be copied into the client's manual entry
@@ -65,7 +70,7 @@ pub async fn run(app_config: AppConfig, shutdown: Arc<Notify>) -> Result<()> {
     tracing::info!("TOFU payload: {}", tofu_payload);
 
     let relay = Arc::new(
-        server::RelayServer::new(app_config.server.clone(), cert_manager, tui).await?,
+        relay::RelayServer::new(app_config.server.clone(), cert_manager, tui).await?,
     );
 
     relay.run(shutdown).await

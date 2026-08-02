@@ -59,8 +59,11 @@ Impulse — это relay-сервер для end-to-end-encrypted мессенд
     обратный отсчёт до истечения сертификата, индикатор ⚠ во время перекрытия ключей
     и сканируемый QR-код.
   - **Правая колонка** (Help bar + Logs): поток логов сервера в реальном времени
-    с фильтрацией по уровням (`1`–`5`), прокруткой (`↑↓`/`PgUp`/`PgDn`/`Home`/`End`)
-    и `Shift+C` для копирования логов в буфер обмена.
+    с фильтрами `1`–`5` (ERR/WRN/INF/DBG/TRC), прокруткой
+    (`↑↓`/`PgUp`/`PgDn`/`Home`/`End` или колесо мыши), поиском (`/`), `Space`
+    для паузы и `Shift+C` для копирования логов в буфер обмена. `Tab` переключает
+    панели Server/Sessions, `f` фокусирует QR-код; status bar показывает
+    throughput, uptime, активные фильтры и подсказки.
   `Ctrl+C` / `q` — корректное завершение работы.
 
 ## Сборка и запуск
@@ -294,16 +297,17 @@ Wire-parser валидирует заявленную длину пакета п
 
 ```
 src/
-  cert.rs      — генерация ECDSA P-256 сертификатов, ротация, SHA-256 TOFU отпечаток, FS персист
-  storage.rs   — эфемерный in-RAM лог сообщений (TTL 72ч, sequence ids)
-  protocol.rs  — бинарные wire-фреймы (опкоды 0x01–0x0C)
-  server.rs    — WebTransport эндпойнт, обработка сессий, broadcast relay
-  tui.rs       — терминальный UI: Server Info header, лог-стрим, TOFU QR / fingerprint панель
-  logging.rs   — мост tracing → TUI / rolling-файл
-  config.rs    — загрузка CLI + config.toml
+  cert/        — генерация ECDSA P-256 сертификатов, ротация, SHA-256 TOFU отпечаток, FS персист
+  storage/     — эфемерный in-RAM лог сообщений (TTL 72ч, sequence ids)
+  protocol.rs  — бинарные wire-фреймы; framing/limits находятся в protocol/
+  relay/       — WebTransport эндпойнт, обработка сессий, auth и broadcast relay
+  ui/          — терминальный UI: панели Server/Sessions, логи, TOFU QR и live stats
+  logging/     — мост tracing → TUI / rolling-файл
+  config/      — разбор CLI и загрузка config.toml
+  cli/         — first-run и --init wizard'ы, запись конфига
   lib.rs       — связка + run() entry point
   main.rs      — бинарный entry point
-  tests.rs     — юнит-тесты (протокол + хранилище)
+tests/         — интеграционные тесты (handshake, relay, config, storage)
 ```
 
 ## Лицензия
