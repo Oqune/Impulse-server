@@ -25,43 +25,17 @@ use crate::cert::DynamicCertResolver;
 use crate::protocol::{
     Opcode, PacketReader, RelayedMessage, ServerPacketEncoder, encode_auth_challenge,
 };
+use crate::protocol::limits::{MAX_PAYLOAD_BYTES, MAX_STREAM_BUFFER};
 use crate::storage::MessageStore;
 use crate::tui::TuiHandle;
 
-fn opcode_name(b: u8) -> &'static str {
-    match b {
-        0x01 => "Auth",
-        0x02 => "AuthResult",
-        0x03 => "Sync",
-        0x04 => "SyncResponse",
-        0x05 => "Data",
-        0x06 => "Heartbeat",
-        0x07 => "NewCertHash",
-        0x0B => "AuthChallenge",
-        0x0C => "KeyExchangeKemDsa",
-        _ => "UNKNOWN",
-    }
+/// Thin re-export so `tests.rs` callers keep compiling until `server.rs` is
+/// removed (Task 3).
+pub use crate::protocol::framing::{TryReadResult, try_read_packet};
+
+fn op_name(op: u8) -> &'static str {
+    Opcode::from_u8(op).map(Opcode::display_name).unwrap_or("UNKNOWN")
 }
-
-fn hex_dump(bytes: &[u8], max: usize) -> String {
-    let show = bytes.len().min(max);
-    let hex: String = bytes[..show]
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect::<Vec<_>>()
-        .join(" ");
-    if bytes.len() > max {
-        format!("{}... ({} bytes total)", hex, bytes.len())
-    } else {
-        format!("{} ({} bytes)", hex, bytes.len())
-    }
-}
-
-/// Max incoming message payload size (bytes) to bound memory.
-pub(crate) const MAX_PAYLOAD_BYTES: usize = 1_000_000;
-
-/// Max bytes buffered from a single stream before we give up (defensive).
-const MAX_STREAM_BUFFER: usize = 8 * 1024 * 1024;
 
 /// Aggregate memory budget across all sessions. When total buffered bytes
 /// across all reader tasks exceed this, new reads are rejected to prevent
@@ -524,7 +498,7 @@ impl RelayServer {
                                     let packet = msg.to_packet();
                                     let op = if packet.is_empty() { 0 } else { packet[0] };
                                     debug!("[WRITER] Session {} <- DATA relay opcode=0x{:02x} ({}) len={}",
-                                        session_key, op, opcode_name(op), packet.len());
+                                        session_key, op, op_name(op), packet.len());
                                             if let Err(e) = writer.write_all(&packet).await {
                                         warn!("[WRITER] Session {} write error: {}", session_key, e);
                                         break;
@@ -549,7 +523,7 @@ impl RelayServer {
                                 Ok(packet) => {
                                     let op = if packet.is_empty() { 0 } else { packet[0] };
                                     debug!("[WRITER] Session {} <- CONTROL opcode=0x{:02x} ({}) len={}",
-                                        session_key, op, opcode_name(op), packet.len());
+                                        session_key, op, op_name(op), packet.len());
                                     if let Err(e) = writer.write_all(&packet).await {
                                         warn!("[WRITER] Session {} control write error: {}", session_key, e);
                                         break;
@@ -573,7 +547,7 @@ impl RelayServer {
                                     }
                                     let op = if packet.is_empty() { 0 } else { packet[0] };
                                     debug!("[WRITER] Session {} <- KEYEXCHANGE (from session {}) opcode=0x{:02x} ({}) len={}",
-                                        session_key, src_session, op, opcode_name(op), packet.len());
+                                        session_key, src_session, op, op_name(op), packet.len());
                                     if let Err(e) = writer.write_all(&packet).await {
                                         warn!("[WRITER] Session {} keyexchange write error: {}", session_key, e);
                                         break;
@@ -592,7 +566,7 @@ impl RelayServer {
                         Some(packet) = direct_rx.recv() => {
                             let op = if packet.is_empty() { 0 } else { packet[0] };
                             debug!("[WRITER] Session {} <- DIRECT opcode=0x{:02x} ({}) len={}",
-                                session_key, op, opcode_name(op), packet.len());
+                                session_key, op, op_name(op), packet.len());
                             if let Err(e) = writer.write_all(&packet).await {
                                 warn!("[WRITER] Session {} direct write error: {}", session_key, e);
                                 break;
@@ -636,11 +610,6 @@ impl RelayServer {
                         Ok(Ok(n)) => {
                             if tracing::enabled!(tracing::Level::TRACE) {
                                 trace!("[READER] Session {} raw chunk: {} bytes", session_key, n);
-                                trace!(
-                                    "[READER] Session {} hex: {}",
-                                    session_key,
-                                    hex_dump(&chunk[..n], 128)
-                                );
                             }
                             // Extend buffer first, then update aggregate budget.
                             buf.extend_from_slice(&chunk[..n]);
@@ -701,7 +670,7 @@ impl RelayServer {
                                             "[READER] Session {} -> opcode=0x{:02x} ({}) total_packet={} bytes",
                                             session_key,
                                             op,
-                                            opcode_name(op),
+                                            op_name(op),
                                             packet_len
                                         );
                                         if let Err(e) = this
@@ -1178,67 +1147,4 @@ impl RelayServer {
             }
         });
     }
-}
-
-/// Result of [`try_read_packet`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TryReadResult {
-    /// A full packet is available (consumable now). Inner is the packet length.
-    Packet(usize),
-    /// Buffer is incomplete; wait for more bytes.
-    Incomplete,
-    /// Leading byte is not a recognized client opcode — skip 1 byte and retry.
-    UnknownOpcode,
-    /// The declared payload length exceeds `MAX_PACKET_LEN` — the session
-    /// must be closed because the stream is corrupted beyond recovery.
-    OversizedPayload,
-}
-
-/// Try to read a complete packet length from the buffer.
-pub(crate) fn try_read_packet(buf: &[u8]) -> TryReadResult {
-    if buf.is_empty() {
-        return TryReadResult::Incomplete;
-    }
-    let opcode = buf[0];
-    let min_len = match opcode {
-        0x01 => 1 + 4 + 32,  // Auth: opcode + len prefix + fixed 32-byte HMAC
-        0x03 => 1 + 8,       // Sync: opcode + u64
-        0x05 => 1 + 4,       // Data: opcode + len prefix
-        0x06 => 1 + 8,       // Heartbeat: opcode + u64
-        0x0C => 1 + 4,       // KeyExchangeKemDsa: opcode + len prefix
-        _ => return TryReadResult::UnknownOpcode,
-    };
-    if buf.len() < min_len {
-        return TryReadResult::Incomplete;
-    }
-
-    const MAX_PACKET_LEN: usize = 1 + 4 + MAX_PAYLOAD_BYTES;
-
-    let len = match opcode {
-        0x01 => {
-            if buf.len() < 5 {
-                return TryReadResult::Incomplete;
-            }
-            let pwd_len = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
-            let total = 1 + 4 + pwd_len + 32;
-            if total > MAX_PACKET_LEN {
-                return TryReadResult::OversizedPayload;
-            }
-            return TryReadResult::Packet(total);
-        }
-        0x05 | 0x0C => {
-            if buf.len() < 5 {
-                return TryReadResult::Incomplete;
-            }
-            u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize
-        }
-        0x03 | 0x06 => {
-            return TryReadResult::Packet(9);
-        }
-        _ => return TryReadResult::UnknownOpcode,
-    };
-    if len > MAX_PACKET_LEN {
-        return TryReadResult::OversizedPayload;
-    }
-    TryReadResult::Packet(1 + 4 + len)
 }

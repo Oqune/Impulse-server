@@ -18,7 +18,8 @@
 //! * `0x0B` AuthChallenge — server → client: 16-byte random nonce.
 //! * `0x0C` KeyExchangeKemDsa — either direction: combined KEM + DSA public keys.
 
-use std::io::{self};
+pub mod framing;
+pub mod limits;
 
 /// Packet opcodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +57,21 @@ impl Opcode {
     pub fn as_u8(self) -> u8 {
         self as u8
     }
+
+    /// Human-readable opcode name for logs and the TUI.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Opcode::Auth => "Auth",
+            Opcode::AuthResult => "AuthResult",
+            Opcode::Sync => "Sync",
+            Opcode::SyncResponse => "SyncResponse",
+            Opcode::Data => "Data",
+            Opcode::Heartbeat => "Heartbeat",
+            Opcode::NewCertHash => "NewCertHash",
+            Opcode::AuthChallenge => "AuthChallenge",
+            Opcode::KeyExchangeKemDsa => "KeyExchangeKemDsa",
+        }
+    }
 }
 
 /// Errors produced while decoding binary packets.
@@ -77,20 +93,6 @@ impl std::fmt::Display for ProtocolError {
 }
 
 impl std::error::Error for ProtocolError {}
-
-impl From<ProtocolError> for io::Error {
-    fn from(e: ProtocolError) -> Self {
-        match e {
-            ProtocolError::UnexpectedEof => {
-                io::Error::new(io::ErrorKind::UnexpectedEof, "packet truncated")
-            }
-            ProtocolError::UnknownOpcode(b) => io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("unknown opcode 0x{b:02x}"),
-            ),
-        }
-    }
-}
 
 /// A small buffered binary reader over a byte slice, all integers little-endian.
 pub struct PacketReader<'a> {
@@ -206,7 +208,7 @@ impl PacketWriter {
 
     /// Append a length-prefixed (u32) byte blob.
     pub fn write_len_prefixed(&mut self, data: &[u8]) -> &mut Self {
-        debug_assert!(data.len() <= crate::server::MAX_PAYLOAD_BYTES as usize);
+        debug_assert!(data.len() <= limits::MAX_PAYLOAD_BYTES);
         self.write_u32(data.len() as u32);
         self.buf.extend_from_slice(data);
         self
@@ -271,14 +273,6 @@ pub fn encode_new_cert_hash(hash: &[u8; 32], expires_at: u64) -> Vec<u8> {
     let mut w = PacketWriter::with_opcode(Opcode::NewCertHash);
     w.buf.extend_from_slice(hash);
     w.write_u64(expires_at);
-    w.into_bytes()
-}
-
-/// Build a `KeyExchange` packet preserving the original opcode
-/// (0x0C for combined KEM+DSA) so clients can distinguish key types.
-pub fn encode_key_exchange_tagged(public_key: &[u8], opcode: Opcode) -> Vec<u8> {
-    let mut w = PacketWriter::with_opcode(opcode);
-    w.write_len_prefixed(public_key);
     w.into_bytes()
 }
 
