@@ -5,7 +5,7 @@
 //!   2-day overlap rotation, SHA-256 TOFU fingerprint.
 //! * `storage` — ephemeral in-RAM message log with 72h TTL and sequence ids.
 //! * `protocol` — binary wire frames (opcodes 0x01–0x0B) over WebTransport.
-//! * `server` — WebTransport endpoint, session handling and broadcast relay.
+//! * `relay` — WebTransport endpoint, session handling and broadcast relay.
 //! * `tui` — terminal UI: Server Info header, log stream, TOFU QR / fingerprint panel.
 //! * `logging` — `tracing` → TUI / file bridge.
 
@@ -14,7 +14,7 @@ pub mod config;
 pub mod crypto;
 pub mod logging;
 pub mod protocol;
-pub mod server;
+pub mod relay;
 pub mod setup;
 pub mod storage;
 pub mod tui;
@@ -66,7 +66,7 @@ pub async fn run(app_config: AppConfig, shutdown: Arc<Notify>) -> Result<()> {
     tracing::info!("TOFU payload: {}", tofu_payload);
 
     let relay = Arc::new(
-        server::RelayServer::new(app_config.server.clone(), cert_manager, tui).await?,
+        relay::RelayServer::new(app_config.server.clone(), cert_manager, tui).await?,
     );
 
     relay.run(shutdown).await

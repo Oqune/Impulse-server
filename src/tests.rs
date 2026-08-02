@@ -1440,7 +1440,7 @@ mod e2e_integration_tests {
     use crate::protocol::{
         Opcode, PacketReader, PacketWriter, encode_sync_response,
     };
-    use crate::server::{TryReadResult, try_read_packet};
+    use crate::relay::{TryReadResult, try_read_packet};
     use crate::storage::MessageStore;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;

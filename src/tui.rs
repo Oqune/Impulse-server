@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 use std::io::Stdout;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -159,10 +159,8 @@ pub struct ServerInfo {
 pub struct TuiHandle {
     pub log_tx: crossbeam_channel::Sender<LogRecord>,
     pub cert: Arc<Mutex<CertView>>,
-    /// Live count of active sessions, updated by the server.
-    pub session_count: Arc<AtomicUsize>,
-    /// Live count of stored messages, updated by the server.
-    pub message_count: Arc<AtomicUsize>,
+    /// Live counters shared with the relay (spec §3 "Atomics shared with the relay").
+    pub stats: Arc<crate::relay::stats::ServerStats>,
     /// Static (and semi-live) server technical info shown above the logs.
     pub info: Arc<Mutex<ServerInfo>>,
     /// Triggered when the user requests shutdown ('q' / Ctrl+C) from the TUI.
@@ -182,9 +180,15 @@ impl TuiHandle {
         *self.info.lock().unwrap_or_else(|e| e.into_inner()) = info;
     }
 
+    /// The shared `ServerStats` Arc the relay increments; both sides see the
+    /// same counters.
+    pub fn stats_handle(&self) -> Arc<crate::relay::stats::ServerStats> {
+        self.stats.clone()
+    }
+
     pub fn set_stats(&self, sessions: usize, messages: usize) {
-        self.session_count.store(sessions, Ordering::Relaxed);
-        self.message_count.store(messages, Ordering::Relaxed);
+        self.stats.sessions.store(sessions, Ordering::Relaxed);
+        self.stats.messages.store(messages, Ordering::Relaxed);
     }
 }
 
@@ -192,7 +196,7 @@ impl TuiHandle {
 pub fn run_tui(
     log_rx: crossbeam_channel::Receiver<LogRecord>,
     cert: Arc<Mutex<CertView>>,
-    stats: (Arc<AtomicUsize>, Arc<AtomicUsize>),
+    stats: Arc<crate::relay::stats::ServerStats>,
     info: Arc<Mutex<ServerInfo>>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> anyhow::Result<()> {
@@ -228,8 +232,8 @@ pub fn run_tui(
             .collect();
 
         let stats = (
-            stats.0.load(Ordering::Relaxed),
-            stats.1.load(Ordering::Relaxed),
+            stats.sessions.load(Ordering::Relaxed),
+            stats.messages.load(Ordering::Relaxed),
         );
         let info = info.lock().unwrap_or_else(|e| e.into_inner()).clone();
         draw(
@@ -743,19 +747,18 @@ pub fn spawn_tui(
 ) -> anyhow::Result<TuiHandle> {
     let (log_tx, log_rx) = crossbeam_channel::unbounded::<LogRecord>();
     let cert = Arc::new(Mutex::new(initial));
-    let session_count = Arc::new(AtomicUsize::new(0));
-    let message_count = Arc::new(AtomicUsize::new(0));
+    let stats = Arc::new(crate::relay::stats::ServerStats::new());
     let info = Arc::new(Mutex::new(ServerInfo::default()));
 
     let cert_clone = cert.clone();
-    let s_clone = (session_count.clone(), message_count.clone());
+    let stats_clone = stats.clone();
     let info_clone = info.clone();
     let shutdown_clone = shutdown.clone();
 
     // Use a oneshot channel to propagate TUI init errors back to the caller.
     let (init_tx, init_rx) = crossbeam_channel::bounded::<anyhow::Result<()>>(1);
     std::thread::spawn(move || {
-        let result = run_tui(log_rx, cert_clone, s_clone, info_clone, shutdown_clone);
+        let result = run_tui(log_rx, cert_clone, stats_clone, info_clone, shutdown_clone);
         let _ = init_tx.send(result);
     });
 
@@ -777,8 +780,7 @@ pub fn spawn_tui(
     Ok(TuiHandle {
         log_tx,
         cert,
-        session_count,
-        message_count,
+        stats,
         info,
         shutdown,
     })
