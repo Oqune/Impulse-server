@@ -11,8 +11,9 @@ key.pem
 *.crt
 *.der
 
-# Runtime config that may contain secrets (keep the .example)
-config.toml
+# Runtime config that may contain secrets (keep the .example).
+# Anchored to the crate root: packaging/config.toml is a tracked install template.
+/config.toml
 
 # Logs
 *.log

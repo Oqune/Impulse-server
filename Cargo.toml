@@ -92,7 +92,7 @@ priority = "optional"
 depends = "$auto"
 assets = [
     ["target/release/impulse-server", "usr/bin/", "755"],
-    ["config.toml.example", "etc/impulse-server/config.toml", "644"],
+    ["packaging/config.toml", "etc/impulse-server/config.toml", "644"],
     ["packaging/impulse-server.service", "lib/systemd/system/", "644"],
 ]
 
@@ -104,6 +104,6 @@ description = "Impulse Server - secure ephemeral messenger server over WebTransp
 version = "2.5.0"
 assets = [
     { source = "target/release/impulse-server", dest = "/usr/bin/impulse-server", mode = "755" },
-    { source = "config.toml.example", dest = "/etc/impulse-server/config.toml", mode = "644" },
+    { source = "packaging/config.toml", dest = "/etc/impulse-server/config.toml", mode = "644" },
     { source = "packaging/impulse-server.service", dest = "/usr/lib/systemd/system/", mode = "644" },
 ]

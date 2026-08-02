@@ -1,0 +1,7 @@
+[server]
+address = "0.0.0.0:4433"
+cert_dir = "cert_data"
+# REQUIRED. The server refuses to start with an empty hash on purpose — no
+# secret by default. Configure with:  impulse-server --init   (writes a
+# config with a real Argon2id hash), or set server.password_hash.
+password_hash = ""
