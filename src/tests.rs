@@ -1899,8 +1899,36 @@ mod e2e_integration_tests {
 
 #[cfg(test)]
 mod config_tests {
-    use crate::config::{CliArgs, load_config};
+    use crate::config::{CliArgs, SetupCommand, load_config, resolve_command};
     use clap::Parser;
+
+    #[test]
+    fn commands_are_mutually_exclusive() {
+        let mut c = CliArgs::parse_from(["impulse-server"]);
+        c.license = true;
+        c.init = true;
+        assert!(resolve_command(&c).is_err(), "license+init must be rejected");
+
+        let mut c2 = CliArgs::parse_from(["impulse-server"]);
+        c2.init = true;
+        c2.hash_password = Some("pw".to_string());
+        assert!(resolve_command(&c2).is_err(), "init+hash-password must be rejected");
+    }
+
+    #[test]
+    fn commands_resolve_to_expected_variant() {
+        let c = CliArgs::parse_from(["impulse-server", "--init"]);
+        assert!(matches!(resolve_command(&c).unwrap(), SetupCommand::Init));
+
+        let c = CliArgs::parse_from(["impulse-server", "--license"]);
+        assert!(matches!(resolve_command(&c).unwrap(), SetupCommand::PrintLicense));
+
+        let c = CliArgs::parse_from(["impulse-server", "--hash-password", "abc"]);
+        assert!(matches!(resolve_command(&c).unwrap(), SetupCommand::HashPassword(p) if p == "abc"));
+
+        let c = CliArgs::parse_from(["impulse-server"]);
+        assert!(matches!(resolve_command(&c).unwrap(), SetupCommand::Run));
+    }
 
     const TEST_HASH: &str = "$argon2id$v=19$m=47104,t=3,p=1$ZU3OGIF2VhIrUVb19y2izg$7njBEf6KUZtU/sC4HSVFti9DFEC3Mkwqd+uQsUqBAUc";
 

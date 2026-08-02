@@ -61,8 +61,55 @@ pub struct CliArgs {
     )]
     pub hash_password: Option<String>,
 
+    #[arg(
+        long,
+        help = "Interactively create a config.toml (prompts for password, address, SANs) and exit"
+    )]
+    pub init: bool,
+
+    #[arg(
+        long,
+        help = "Overwrite an existing config.toml when used with --init"
+    )]
+    pub force: bool,
+
+    #[arg(long, help = "Print the MIT license text and exit")]
+    pub license: bool,
+
     #[arg(long, help = "Path to a TOML config file")]
     pub config: Option<String>,
+}
+
+/// One-shot commands that exit before the server starts.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SetupCommand {
+    /// Normal run: start the relay.
+    Run,
+    /// `--hash-password <pw>`: print an Argon2id hash and exit.
+    HashPassword(String),
+    /// `--license`: print the MIT license text and exit.
+    PrintLicense,
+    /// `--init`: run the interactive setup wizard and exit.
+    Init,
+}
+
+/// Resolve the one-shot command from CLI flags, rejecting combinations.
+pub fn resolve_command(cli: &CliArgs) -> anyhow::Result<SetupCommand> {
+    let count =
+        usize::from(cli.license) + usize::from(cli.init) + usize::from(cli.hash_password.is_some());
+    if count > 1 {
+        anyhow::bail!("--license, --init, and --hash-password are mutually exclusive");
+    }
+    if cli.license {
+        return Ok(SetupCommand::PrintLicense);
+    }
+    if cli.init {
+        return Ok(SetupCommand::Init);
+    }
+    if let Some(pw) = &cli.hash_password {
+        return Ok(SetupCommand::HashPassword(pw.clone()));
+    }
+    Ok(SetupCommand::Run)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
