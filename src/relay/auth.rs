@@ -254,7 +254,7 @@ pub(crate) async fn process_packet(
                 Ok(n) => {
                     debug!("[DATA] Session {} broadcast OK to {} receivers", session_key, n);
                     relay.stats.relayed_msgs.fetch_add(1, Ordering::Relaxed);
-                    relay.stats.relayed_bytes.fetch_add(payload.len() as usize, Ordering::Relaxed);
+                    relay.stats.relayed_bytes.fetch_add(payload.len(), Ordering::Relaxed);
                 }
                 Err(_) => debug!("[DATA] Session {} broadcast: no receivers", session_key),
             }

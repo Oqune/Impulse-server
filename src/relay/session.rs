@@ -230,7 +230,7 @@ impl RelayServer {
                                     break;
                                 }
                                 relay.stats.relayed_msgs.fetch_add(1, Ordering::Relaxed);
-                                relay.stats.relayed_bytes.fetch_add(packet.len() as usize, Ordering::Relaxed);
+                                relay.stats.relayed_bytes.fetch_add(packet.len(), Ordering::Relaxed);
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                                 warn!("[WRITER] Session {} lagged, missed {} messages, continuing",

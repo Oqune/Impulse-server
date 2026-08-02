@@ -96,15 +96,14 @@ impl AppConfig {
         }
 
         // Validate optional IPv6 bind address.
-        if !self.server.address6.is_empty() {
-            if self.server.address6.parse::<std::net::SocketAddr>().is_err()
-                && self.server.address6.parse::<std::net::SocketAddrV6>().is_err()
-            {
-                anyhow::bail!(
-                    "invalid IPv6 bind address '{}': expected format like '[::]:4433'",
-                    self.server.address6
-                );
-            }
+        if !self.server.address6.is_empty()
+            && self.server.address6.parse::<std::net::SocketAddr>().is_err()
+            && self.server.address6.parse::<std::net::SocketAddrV6>().is_err()
+        {
+            anyhow::bail!(
+                "invalid IPv6 bind address '{}': expected format like '[::]:4433'",
+                self.server.address6
+            );
         }
 
         Ok(())
