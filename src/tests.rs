@@ -2027,12 +2027,15 @@ mod config_tests {
         let c = cli_with_config(Some(cfg_path.to_str().unwrap()));
         assert!(config_file_loaded(&c));
 
-        // No config anywhere → false (wizard may run).
+        // No explicit config: discovery depends on whether cwd (the crate root in
+        // tests) holds a stray config.toml; the exe dir (target/debug/deps) never does.
         let c = cli_with_config(None);
-        // cwd of a test is the crate root; avoid false positives from a stray config.toml.
-        if config_file_loaded(&c) {
-            // If the repo happens to have config.toml at cwd, skip: behavior is correct there.
-            eprintln!("note: cwd contains config.toml; skipping negative discovery assert");
+        if std::path::Path::new("config.toml").exists() {
+            // cwd has config.toml → discovery must report it as loaded.
+            assert!(config_file_loaded(&c), "expected discovery to find cwd config.toml");
+        } else {
+            // cwd is clean → nothing discoverable → not loaded (wizard may run).
+            assert!(!config_file_loaded(&c), "expected no config to be discovered");
         }
 
         let _ = std::fs::remove_file(&cfg_path);
