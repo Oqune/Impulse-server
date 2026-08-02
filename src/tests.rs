@@ -1913,6 +1913,11 @@ mod config_tests {
         c2.init = true;
         c2.hash_password = Some("pw".to_string());
         assert!(resolve_command(&c2).is_err(), "init+hash-password must be rejected");
+
+        let mut c3 = CliArgs::parse_from(["impulse-server"]);
+        c3.license = true;
+        c3.hash_password = Some("pw".to_string());
+        assert!(resolve_command(&c3).is_err(), "license+hash-password must be rejected");
     }
 
     #[test]
@@ -1928,6 +1933,12 @@ mod config_tests {
 
         let c = CliArgs::parse_from(["impulse-server"]);
         assert!(matches!(resolve_command(&c).unwrap(), SetupCommand::Run));
+
+        let c = CliArgs::parse_from(["impulse-server", "--force"]);
+        assert!(matches!(resolve_command(&c).unwrap(), SetupCommand::Run));
+
+        let c = CliArgs::parse_from(["impulse-server", "--init", "--force"]);
+        assert!(matches!(resolve_command(&c).unwrap(), SetupCommand::Init));
     }
 
     const TEST_HASH: &str = "$argon2id$v=19$m=47104,t=3,p=1$ZU3OGIF2VhIrUVb19y2izg$7njBEf6KUZtU/sC4HSVFti9DFEC3Mkwqd+uQsUqBAUc";

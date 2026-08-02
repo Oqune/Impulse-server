@@ -22,10 +22,14 @@ pub fn write_config_file(path: &Path, cfg: &AppConfig, overwrite: bool) -> anyho
     #[cfg(unix)]
     {
         use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true).mode(0o600);
-        let mut f = opts.open(path)?;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         f.write_all(text.as_bytes())?;
     }
     #[cfg(not(unix))]
