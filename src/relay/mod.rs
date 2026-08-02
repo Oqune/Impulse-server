@@ -162,7 +162,7 @@ impl RelayServer {
         // "Atomics shared with the relay") — a separate Arc would make the TUI
         // show only zeros for every counter the relay increments.
         let stats = tui.stats_handle();
-        tui.set_stats(0, 0);
+        tui.set_stats(0);
 
         let server = Self {
             config: config.clone(),

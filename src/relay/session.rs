@@ -120,17 +120,10 @@ impl RelayServer {
         // so the two endpoints ended up on different streams and no data flowed
         // in either direction (session handshake succeeded, but auth/relay never
         // worked).
-        info!(
-            "[STREAM] Session {} waiting to accept bidirectional stream...",
-            session_key
-        );
         let (mut send_stream, recv_stream) = match connection.accept_bi().await {
-            Ok(pair) => {
-                info!("[STREAM] Session {} stream accepted OK", session_key);
-                pair
-            }
+            Ok(pair) => pair,
             Err(e) => {
-                info!("[STREAM] Session {} accept_bi FAILED: {}", session_key, e);
+                warn!("[STREAM] Session {} accept_bi FAILED: {}", session_key, e);
                 connection.close(wtransport::VarInt::from(0u32), b"stream");
                 return;
             }
@@ -173,7 +166,6 @@ impl RelayServer {
             connection.close(wtransport::VarInt::from(0u32), b"flush");
             return;
         }
-        info!("[STREAM] Session {} sent auth challenge", session_key);
 
         self.run_session(session_key, remote_ip, recv_stream, send_stream, _permit)
             .await;
@@ -210,12 +202,13 @@ impl RelayServer {
         };
         self.sessions.insert(session_key, meta);
         self.stats.bump_sessions();
-        self.tui.set_stats(self.sessions.len(), self.store.len());
+        self.tui.set_stats(self.sessions.len());
         self.tui.set_sessions(self.session_rows());
+
+        let relay = self.clone();
 
         // Task: forward broadcast messages AND direct responses to this session's send stream.
         let mut writer_task = tokio::spawn(async move {
-            info!("[WRITER] Session {} writer task started", session_key);
             loop {
                 tokio::select! {
                     result = data_sub.recv() => {
@@ -236,13 +229,14 @@ impl RelayServer {
                                     warn!("[WRITER] Session {} flush error: {}", session_key, e);
                                     break;
                                 }
+                                relay.stats.relayed_msgs.fetch_add(1, Ordering::Relaxed);
+                                relay.stats.relayed_bytes.fetch_add(packet.len() as usize, Ordering::Relaxed);
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                                 warn!("[WRITER] Session {} lagged, missed {} messages, continuing",
                                     session_key, n);
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                info!("[WRITER] Session {} data channel closed", session_key);
                                 break;
                             }
                         }
@@ -313,7 +307,6 @@ impl RelayServer {
             }
             let _ = writer.flush().await;
             let _ = writer.shutdown().await;
-            info!("[WRITER] Session {} writer task ended", session_key);
         });
 
         // Task: read length-prefixed binary packets from the client.
@@ -322,7 +315,6 @@ impl RelayServer {
             let direct_tx = direct_tx.clone();
             let mut session = Session::new(session_key, remote_ip);
             tokio::spawn(async move {
-                info!("[READER] Session {} reader task started", session_key);
                 let mut buf = BudgetedBuffer::new(&this.stats.buffered_bytes);
                 let mut chunk = [0u8; 8192];
 
@@ -331,7 +323,6 @@ impl RelayServer {
                         tokio::time::timeout(SESSION_IDLE_TIMEOUT, reader.read(&mut chunk)).await;
                     match read {
                         Ok(Ok(0)) => {
-                            info!("[READER] Session {} EOF (client disconnected)", session_key);
                             break; // EOF
                         }
                         Ok(Ok(n)) => {
@@ -447,7 +438,7 @@ impl RelayServer {
                             }
                         }
                         Ok(Err(e)) => {
-                            info!("[READER] Session {} stream read error: {}", session_key, e);
+                            warn!("[READER] Session {} stream read error: {}", session_key, e);
                             break;
                         }
                         Err(_) => {
@@ -464,10 +455,6 @@ impl RelayServer {
                 // If this cleanup is never reached (task aborted), `Drop` on
                 // `BudgetedBuffer` reconciles the same bytes.
                 buf.reconcile();
-                info!(
-                    "[READER] Session {} reader task ended (authenticated={})",
-                    session_key, session.authenticated
-                );
             })
         };
 
@@ -481,11 +468,6 @@ impl RelayServer {
         let _ = writer_task.await;
         let _ = reader_task.await;
 
-        info!(
-            "[SESSION] Session {} CLOSED (sessions_left={})",
-            session_key,
-            self.sessions.len().saturating_sub(1)
-        );
         cleanup_session_state(
             &self.sessions,
             &self.stats,
@@ -494,13 +476,7 @@ impl RelayServer {
             &self.key_exchange_store,
             session_key,
         );
-        self.tui.set_stats(self.sessions.len(), self.store.len());
-        self.tui.set_sessions(self.session_rows());
-        info!(
-            "[SESSION] Session {} cleanup complete, remaining sessions={}",
-            session_key,
-            self.sessions.len()
-        );
+        self.tui.set_stats(self.sessions.len());
     }
 }
 

@@ -89,10 +89,9 @@ impl RelayServer {
                 if removed > 0 {
                     debug!("Swept {} expired messages", removed);
                 }
-                let (sessions, messages) = (self.sessions.len(), self.store.len());
+                let sessions = self.sessions.len();
                 self.stats.sessions.store(sessions, Ordering::Relaxed);
-                self.stats.messages.store(messages, Ordering::Relaxed);
-                self.tui.set_stats(sessions, messages);
+                self.tui.set_stats(sessions);
                 self.tui.set_sessions(self.session_rows());
             }
         });

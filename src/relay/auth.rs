@@ -13,7 +13,7 @@ use argon2::password_hash::PasswordHash;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::protocol::limits::MAX_PAYLOAD_BYTES;
 use crate::protocol::{Opcode, PacketReader, RelayedMessage, ServerPacketEncoder};
@@ -146,13 +146,6 @@ pub(crate) async fn process_packet(
                 ok,
                 if ok { None } else { Some("Invalid password or challenge") },
             );
-            info!(
-                "[AUTH] Session {} sending AuthResult: success={} packet_len={}",
-                session_key,
-                ok,
-                response.len()
-            );
-
             direct_tx
                 .send(response)
                 .await
@@ -164,13 +157,8 @@ pub(crate) async fn process_packet(
             if !ok {
                 // Slow down brute-force attempts
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                info!("[AUTH] Session {} auth FAILED -> closing (authenticated was false)", session_key);
                 return Err(anyhow::anyhow!("authentication failed"));
             }
-            info!(
-                "[AUTH] Session {} auth SUCCESS -> authenticated=true",
-                session_key
-            );
 
             // Replay stored key exchanges from ALL OTHER sessions so this
             // newly-authenticated client can send messages to peers that
@@ -190,7 +178,7 @@ pub(crate) async fn process_packet(
                 }
             }
             if replayed > 0 {
-                info!(
+                debug!(
                     "[AUTH] Session {} replayed {} stored key exchanges from peers",
                     session_key, replayed
                 );
@@ -200,7 +188,7 @@ pub(crate) async fn process_packet(
         }
         Opcode::Sync => {
             if !session.authenticated {
-                info!("[SYNC] Session {} REJECTED: not authenticated", session_key);
+                warn!("[SYNC] Session {} REJECTED: not authenticated", session_key);
                 return Err(anyhow::anyhow!("not authenticated"));
             }
             let last_seen_id = reader.read_u64().map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -229,7 +217,7 @@ pub(crate) async fn process_packet(
         }
         Opcode::Data => {
             if !session.authenticated {
-                info!("[DATA] Session {} REJECTED: not authenticated", session_key);
+                warn!("[DATA] Session {} REJECTED: not authenticated", session_key);
                 return Err(anyhow::anyhow!("not authenticated"));
             }
             let payload = reader
@@ -274,7 +262,7 @@ pub(crate) async fn process_packet(
         }
         Opcode::Heartbeat => {
             if !session.authenticated {
-                info!("[HEARTBEAT] Session {} REJECTED: not authenticated", session_key);
+                warn!("[HEARTBEAT] Session {} REJECTED: not authenticated", session_key);
                 return Err(anyhow::anyhow!("not authenticated"));
             }
             let client_ts = reader.read_u64().map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -291,7 +279,7 @@ pub(crate) async fn process_packet(
         }
         Opcode::KeyExchangeKemDsa => {
             if !session.authenticated {
-                info!(
+                warn!(
                     "[KEYEX] Session {} REJECTED: not authenticated",
                     session_key
                 );

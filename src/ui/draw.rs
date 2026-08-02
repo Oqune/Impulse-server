@@ -1,10 +1,10 @@
 //! TUI rendering: layout, panels, log viewport, QR, status bar.
 //!
 //! Layout (full, ≥ ~90 cols × ~26 rows):
-//!   Server | Sessions     (top-left / top-right)
-//!   TOFU QR | Certificate
-//!   Logs (full width)
-//!   Status bar
+//!   Server | Sessions    (left / right-top)
+//!   QR     | Logs        (left / right-bottom)
+//!   Cert   |
+//!   Status bar (full width)
 //! Compact (<90 cols or <24 rows): logs + status bar only.
 
 use std::io::Stdout;
@@ -153,47 +153,53 @@ pub(crate) fn draw(
             return;
         }
 
-        // Full: top panels (Server/QR | Sessions/Cert), then Logs, then status bar.
-        // Split the whole area vertically first so the bottom (logs/status) never
-        // overlaps the panels.
+        // Full: left column (Server/QR/Cert), right column (Sessions + Logs), bottom (Status bar).
+        // First split off the status bar at the bottom.
         let v = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(15), Constraint::Min(3), Constraint::Length(1)])
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
             .split(area);
 
+        let main_area = v[0];
+        let status_area = v[1];
+
         if state.panel_mode == PanelMode::Hidden {
-            // Left column hidden: Sessions/Cert span the full top width.
-            let right_rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(5), Constraint::Min(5)])
-                .split(v[0]);
-            draw_sessions(f, right_rows[0], sessions);
-            draw_cert_info(f, right_rows[1], cert);
+            // Left column hidden: logs span full width.
+            draw_logs(f, main_area, &filtered, state);
         } else {
+            // Horizontal split: left (panels) | right (sessions + logs)
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(60), Constraint::Min(30)])
-                .split(v[0]);
+                .constraints([Constraint::Length(50), Constraint::Min(30)])
+                .split(main_area);
 
-            let left_rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(7), Constraint::Min(5)])
-                .split(cols[0]);
+            let left_area = cols[0];
+            let right_area = cols[1];
+
+            // Left column: vertical stack of Server info (if Full), QR, Certificate
             if state.panel_mode == PanelMode::Full {
+                let left_rows = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(7), Constraint::Min(8), Constraint::Min(6)])
+                    .split(left_area);
                 draw_info(f, left_rows[0], info, stats);
+                draw_qr(f, left_rows[1], cert);
+                draw_cert_info(f, left_rows[2], cert);
+            } else {
+                // QrOnly: QR takes full left column
+                draw_qr(f, left_area, cert);
             }
-            draw_qr(f, left_rows[1], cert);
 
+            // Right column: Sessions on top, Logs below
             let right_rows = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(5), Constraint::Min(5)])
-                .split(cols[1]);
+                .split(right_area);
             draw_sessions(f, right_rows[0], sessions);
-            draw_cert_info(f, right_rows[1], cert);
+            draw_logs(f, right_rows[1], &filtered, state);
         }
 
-        draw_logs(f, v[1], &filtered, state);
-        draw_status_bar(f, v[2], state, stats, info, has_clipboard, filtered_total, throughput);
+        draw_status_bar(f, status_area, state, stats, info, has_clipboard, filtered_total, throughput);
     })?;
     Ok(())
 }
@@ -225,7 +231,7 @@ fn draw_info(f: &mut ratatui::Frame, area: Rect, info: &ServerInfo, stats: &Serv
                 Style::default().fg(THEME.ok),
             ),
             Span::styled("  Msgs: ", Style::default().fg(THEME.label)),
-            Span::raw(format!("{}", stats.messages.load(std::sync::atomic::Ordering::Relaxed))),
+            Span::raw(format!("{}", stats.relayed_msgs.load(std::sync::atomic::Ordering::Relaxed))),
         ]),
         Line::from(vec![
             Span::styled("TTL: ", Style::default().fg(THEME.label)),
@@ -244,42 +250,6 @@ fn draw_info(f: &mut ratatui::Frame, area: Rect, info: &ServerInfo, stats: &Serv
                 .borders(Borders::ALL)
                 .border_type(ratatui::widgets::BorderType::Rounded)
                 .title(" Server ")
-                .border_style(Style::default().fg(THEME.border)),
-        )
-        .wrap(Wrap { trim: true });
-    f.render_widget(block, area);
-}
-
-fn draw_sessions(f: &mut ratatui::Frame, area: Rect, sessions: &[SessionRow]) {
-    let mut lines: Vec<Line> = Vec::new();
-    for row in sessions.iter().take(100) {
-        let auth = if row.authenticated {
-            Span::styled("✓", Style::default().fg(THEME.ok))
-        } else {
-            Span::styled("·", Style::default().fg(THEME.dim))
-        };
-        let buf = "0 B"; // buffered bytes per session is not tracked per-session yet
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:4}  ", row.key), Style::default().fg(THEME.dim)),
-            Span::styled(format!("{:<16}", row.ip.to_string()), Style::default().fg(THEME.value)),
-            Span::raw("  "),
-            auth,
-            Span::styled(format!("  {:>8}", fmt_duration(row.age.as_secs())), Style::default().fg(THEME.dim)),
-            Span::styled(format!("  {buf}"), Style::default().fg(THEME.dim)),
-        ]));
-    }
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "no sessions",
-            Style::default().fg(THEME.dim),
-        )));
-    }
-    let block = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(ratatui::widgets::BorderType::Rounded)
-                .title(" Sessions ")
                 .border_style(Style::default().fg(THEME.border)),
         )
         .wrap(Wrap { trim: true });
@@ -349,6 +319,40 @@ fn draw_cert_info(f: &mut ratatui::Frame, area: Rect, cert: &CertView) {
         )
         .wrap(Wrap { trim: true });
     f.render_widget(info, area);
+}
+
+fn draw_sessions(f: &mut ratatui::Frame, area: Rect, sessions: &[SessionRow]) {
+    let mut lines: Vec<Line> = Vec::new();
+    for row in sessions.iter().take(100) {
+        let auth = if row.authenticated {
+            Span::styled("✓", Style::default().fg(THEME.ok))
+        } else {
+            Span::styled("·", Style::default().fg(THEME.dim))
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:4}  ", row.key), Style::default().fg(THEME.dim)),
+            Span::styled(format!("{:<16}", row.ip.to_string()), Style::default().fg(THEME.value)),
+            Span::raw("  "),
+            auth,
+            Span::styled(format!("  {:>8}", fmt_duration(row.age.as_secs())), Style::default().fg(THEME.dim)),
+        ]));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "no sessions",
+            Style::default().fg(THEME.dim),
+        )));
+    }
+    let block = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .title(" Sessions ")
+                .border_style(Style::default().fg(THEME.border)),
+        )
+        .wrap(Wrap { trim: true });
+    f.render_widget(block, area);
 }
 
 fn draw_logs(f: &mut ratatui::Frame, area: Rect, filtered: &[&LogRecord], state: &TuiState) {
@@ -445,7 +449,7 @@ fn draw_status_bar(
         Style::default().fg(THEME.value),
     ));
     spans.push(Span::styled(
-        format!("Msgs {}  ", stats.messages.load(relaxed)),
+        format!("Msgs {}  ", stats.relayed_msgs.load(relaxed)),
         Style::default().fg(THEME.value),
     ));
     spans.push(Span::styled(

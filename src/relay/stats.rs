@@ -12,8 +12,6 @@ pub struct ServerStats {
     pub sessions: AtomicUsize,
     /// Highest concurrent session count observed.
     pub peak_sessions: AtomicUsize,
-    /// Messages accepted into the store.
-    pub messages: AtomicUsize,
     /// Relay messages forwarded to at least one receiver.
     pub relayed_msgs: AtomicUsize,
     /// Payload bytes relayed.
@@ -42,7 +40,6 @@ impl ServerStats {
             uptime_start: Instant::now(),
             sessions: AtomicUsize::new(0),
             peak_sessions: AtomicUsize::new(0),
-            messages: AtomicUsize::new(0),
             relayed_msgs: AtomicUsize::new(0),
             relayed_bytes: AtomicUsize::new(0),
             auth_ok: AtomicUsize::new(0),

@@ -120,9 +120,8 @@ impl TuiHandle {
         *self.info.lock().unwrap_or_else(|e| e.into_inner()) = info;
     }
 
-    pub fn set_stats(&self, sessions: usize, messages: usize) {
+    pub fn set_stats(&self, sessions: usize) {
         self.stats.sessions.store(sessions, Ordering::Relaxed);
-        self.stats.messages.store(messages, Ordering::Relaxed);
     }
 
     pub fn set_sessions(&self, rows: Vec<SessionRow>) {
