@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Instant;
 
+use dashmap::DashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
@@ -17,7 +18,7 @@ use tracing::{debug, info, trace, warn};
 use crate::protocol::framing::{TryReadResult, try_read_packet};
 use crate::protocol::limits::{MAX_STREAM_BUFFER, MAX_TOTAL_BUFFERED_BYTES};
 use crate::protocol::encode_auth_challenge;
-use crate::relay::{NONCE_LEN, RelayServer, SESSION_IDLE_TIMEOUT, op_name};
+use crate::relay::{NONCE_LEN, RelayServer, SESSION_IDLE_TIMEOUT, ServerStats, op_name};
 
 /// Lightweight snapshot of a live session, stored in the relay's session
 /// registry and displayed by the TUI.
@@ -485,11 +486,14 @@ impl RelayServer {
             session_key,
             self.sessions.len().saturating_sub(1)
         );
-        self.sessions.remove(&session_key);
-        self.stats.drop_session();
-        self.auth_nonces.remove(&session_key);
-        self.auth_attempts.remove(&session_key);
-        self.key_exchange_store.remove(&session_key);
+        cleanup_session_state(
+            &self.sessions,
+            &self.stats,
+            &self.auth_nonces,
+            &self.auth_attempts,
+            &self.key_exchange_store,
+            session_key,
+        );
         self.tui.set_stats(self.sessions.len(), self.store.len());
         self.tui.set_sessions(self.session_rows());
         info!(
@@ -500,9 +504,29 @@ impl RelayServer {
     }
 }
 
+/// Remove all state belonging to a finished session. Kept separate so the
+/// disconnect cleanup invariant can be regression-tested without a live QUIC
+/// endpoint.
+fn cleanup_session_state(
+    sessions: &DashMap<u64, SessionMeta>,
+    stats: &ServerStats,
+    auth_nonces: &DashMap<u64, (Vec<u8>, Instant)>,
+    auth_attempts: &DashMap<u64, AtomicU32>,
+    key_exchange_store: &DashMap<u64, Vec<Vec<u8>>>,
+    session_key: u64,
+) {
+    sessions.remove(&session_key);
+    stats.drop_session();
+    auth_nonces.remove(&session_key);
+    auth_attempts.remove(&session_key);
+    key_exchange_store.remove(&session_key);
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BudgetedBuffer, SessionMeta};
+    use super::{BudgetedBuffer, SessionMeta, cleanup_session_state};
+    use crate::relay::ServerStats;
+    use dashmap::DashMap;
     use std::net::IpAddr;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -565,5 +589,42 @@ mod tests {
         let _ = reader.await;
 
         assert_eq!(budget.load(Ordering::Relaxed), pre);
+    }
+
+    #[test]
+    fn session_cleanup_releases_registry_entry_and_session_counter() {
+        // Regression for Bug 1: invoke the exact state-cleanup helper used by
+        // `handle_wt_session` after a client drops mid-session.
+        let sessions: DashMap<u64, SessionMeta> = DashMap::new();
+        let stats = ServerStats::new();
+        let auth_nonces = DashMap::new();
+        let auth_attempts = DashMap::new();
+        let key_exchange_store = DashMap::new();
+
+        // Session connects: registry entry + counter bump (as run_session does).
+        sessions.insert(
+            7,
+            SessionMeta {
+                ip: "127.0.0.1".parse::<IpAddr>().unwrap(),
+                authenticated: false,
+                connected_at: Instant::now(),
+            },
+        );
+        stats.bump_sessions();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(stats.sessions.load(Ordering::Relaxed), 1);
+
+        // Client drops mid-session: the real teardown removes the entry and
+        // decrements the counter; both must return to 0 together.
+        cleanup_session_state(
+            &sessions,
+            &stats,
+            &auth_nonces,
+            &auth_attempts,
+            &key_exchange_store,
+            7,
+        );
+        assert_eq!(sessions.len(), 0);
+        assert_eq!(stats.sessions.load(Ordering::Relaxed), 0);
     }
 }

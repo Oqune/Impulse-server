@@ -19,9 +19,6 @@ pub mod relay;
 pub mod storage;
 pub mod ui;
 
-#[cfg(test)]
-mod tests;
-
 use std::sync::Arc;
 
 use anyhow::Result;

@@ -15,9 +15,6 @@ pub mod stats;
 
 pub use session::SessionMeta;
 pub use stats::ServerStats;
-/// Thin re-export so `tests.rs` callers keep compiling until the tests are
-/// reorganized (Task 6).
-pub use crate::protocol::framing::{TryReadResult, try_read_packet};
 
 use std::collections::HashMap;
 use std::net::IpAddr;

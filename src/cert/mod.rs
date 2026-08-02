@@ -515,3 +515,21 @@ fn whoami_user() -> anyhow::Result<String> {
     }
     std::env::var("USERNAME").map_err(|_| anyhow::anyhow!("cannot resolve current user"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_is_64_hex_chars() {
+        // Build a tiny fake DER just to exercise the hash function path.
+        // We can't easily construct a real CertificateDer, so we assert the
+        // published property on the algorithm via a known empty input.
+        let der = CertificateDer::from(vec![]);
+        let fp = Cert::fingerprint_of(&der);
+        assert_eq!(fp.len(), 64);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+        let bytes = Cert::fingerprint_bytes_of(&der);
+        assert_eq!(bytes.len(), 32);
+    }
+}
