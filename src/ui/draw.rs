@@ -394,8 +394,20 @@ fn message_spans<'a>(rec: &'a LogRecord, query: Option<&str>, base: Style) -> Ve
     let mut rest: &str = msg;
     let mut rest_lower: &str = lower.as_str();
     while let Some(idx) = rest_lower.find(&query) {
+        // `idx` is a byte offset into the LOWERCASED remainder. A char whose
+        // lowercase form has a different byte length than the original (e.g.
+        // `İ` U+0130 → "i̇", 2 bytes → 3 bytes) shifts these offsets away from
+        // char boundaries of the original, so `split_at` could panic. If either
+        // split point is not a char boundary, stop highlighting and emit the
+        // remainder as a single span.
+        if !rest.is_char_boundary(idx) {
+            break;
+        }
         let (pre, tail) = rest.split_at(idx);
-        let (matched, after) = tail.split_at(query.len());
+        let Some(matched) = tail.get(..query.len()) else {
+            break;
+        };
+        let after = &tail[query.len()..];
         if !pre.is_empty() {
             spans.push(Span::styled(pre.to_string(), base));
         }
@@ -495,5 +507,46 @@ fn fmt_bytes(n: u64) -> String {
         format!("{:.1} KB", n as f64 / 1024.0)
     } else {
         format!("{n} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(message: &str) -> LogRecord {
+        LogRecord {
+            level: Level::INFO,
+            target: "test".to_string(),
+            message: message.to_string(),
+            timestamp: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn message_spans_does_not_panic_on_utf8_case_fold_mismatch() {
+        // `İ` (U+0130) lowercases to "i\u{307}" — 2 UTF-8 bytes become 3, so a
+        // byte index taken from the lowercased copy lands mid-char in the
+        // original. This used to panic inside `split_at`; it must now degrade
+        // to a single unhighlighted span.
+        let record = rec("aİb");
+        let spans = message_spans(&record, Some("i"), Style::default());
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "aİb");
+        assert_eq!(spans[0].style, Style::default());
+    }
+
+    #[test]
+    fn message_spans_highlights_match_before_utf8_char() {
+        // The match precedes the `İ`, so no lowercase byte-offset shift has
+        // happened yet and both split points are char boundaries: highlighting
+        // must apply and the remainder must be preserved.
+        let record = rec("bar İ foo");
+        let spans = message_spans(&record, Some("bar"), Style::default());
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content, "bar");
+        assert_eq!(spans[0].style, Style::default().bg(Color::Yellow).fg(Color::Black));
+        assert_eq!(spans[1].content, " İ foo");
+        assert_eq!(spans[1].style, Style::default());
     }
 }

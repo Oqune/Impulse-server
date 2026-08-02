@@ -378,7 +378,13 @@ pub fn spawn_tui(initial: CertView, shutdown: Arc<tokio::sync::Notify>) -> anyho
     std::thread::spawn(move || {
         // run_tui sends Ok(()) right after terminal setup, so spawn_tui below
         // returns immediately instead of waiting for the TUI loop to finish.
-        let _ = run_tui(log_rx, cert_clone, info_clone, stats_clone, sessions_clone, shutdown_clone, init_tx);
+        // If run_tui fails before that point (raw mode / alternate screen setup),
+        // no Ok(()) was sent; propagate the error so spawn_tui does not return a
+        // live handle for a TUI that never started.
+        let init_tx2 = init_tx.clone();
+        if let Err(e) = run_tui(log_rx, cert_clone, info_clone, stats_clone, sessions_clone, shutdown_clone, init_tx) {
+            let _ = init_tx2.send(Err(e));
+        }
     });
 
     match init_rx.recv_timeout(Duration::from_secs(2)) {
