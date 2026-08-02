@@ -803,7 +803,7 @@ impl RelayServer {
                 attempts.fetch_add(1, Ordering::Relaxed);
 
                 // Verify password against stored Argon2 hash.
-                let hash_ok = crate::config::argon2_verify(&password, &self.password_hash);
+                let hash_ok = crate::crypto::argon2_verify(&password, &self.password_hash);
                 if !hash_ok {
                     warn!("[AUTH] Session {} password verification failed", session_key);
                 }

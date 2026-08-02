@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
-use impulse_server::config::{CliArgs, argon2_hash, config_file_loaded, load_config, resolve_command, SetupCommand};
+use impulse_server::config::{CliArgs, config_file_loaded, load_config, resolve_command, SetupCommand};
+use impulse_server::crypto::argon2_hash;
 use impulse_server::setup::{LICENSE_TEXT, run_first_run_wizard, run_init_wizard};
 use impulse_server::run;
 use tokio::sync::Notify;
@@ -15,7 +16,7 @@ async fn main() -> Result<()> {
     // One-shot commands that exit before the server starts.
     match resolve_command(&cli)? {
         SetupCommand::HashPassword(pw) => {
-            println!("{}", argon2_hash(&pw));
+            println!("{}", argon2_hash(&pw)?);
             return Ok(());
         }
         SetupCommand::PrintLicense => {

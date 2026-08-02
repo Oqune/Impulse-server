@@ -11,6 +11,7 @@
 
 pub mod cert;
 pub mod config;
+pub mod crypto;
 pub mod logging;
 pub mod protocol;
 pub mod server;

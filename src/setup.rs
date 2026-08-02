@@ -92,7 +92,7 @@ pub fn run_first_run_wizard() -> anyhow::Result<()> {
     let password = prompt_password("Enter client password: ")?;
     let cfg = crate::config::AppConfig {
         server: crate::config::ServerSettings {
-            password_hash: crate::config::argon2_hash(&password),
+            password_hash: crate::crypto::argon2_hash(&password)?,
             ..Default::default()
         },
     };
@@ -106,7 +106,7 @@ pub fn run_first_run_wizard() -> anyhow::Result<()> {
 pub fn run_init_wizard(force: bool) -> anyhow::Result<()> {
     let password = prompt_password("Enter client password: ")?;
     let mut settings = crate::config::ServerSettings {
-        password_hash: crate::config::argon2_hash(&password),
+        password_hash: crate::crypto::argon2_hash(&password)?,
         ..Default::default()
     };
 

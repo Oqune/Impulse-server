@@ -283,53 +283,6 @@ pub fn current_port(address: &str) -> u16 {
         .unwrap_or(4433)
 }
 
-/// SHA-256 hex of a string (used in tests).
-pub fn sha256_hex(input: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-/// Argon2id hash of a string (used by --hash-password).
-pub fn argon2_hash(input: &str) -> String {
-    use argon2::password_hash::{PasswordHasher, SaltString};
-    use rand::rngs::OsRng;
-    let salt = SaltString::generate(&mut OsRng);
-    // Use Argon2id explicitly to match argon2_verify which uses Argon2::new(Argon2id, ...).
-    // Argon2::default() may use Argon2i which would cause silent verification failures.
-    let argon2 = argon2::Argon2::new(
-        argon2::Algorithm::Argon2id,
-        argon2::Version::V0x13,
-        argon2::Params::default(),
-    );
-    argon2
-        .hash_password(input.as_bytes(), &salt)
-        .expect("Argon2 hash should not fail")
-        .to_string()
-}
-
-/// Verify a password against an Argon2id encoded hash.
-pub fn argon2_verify(password: &str, stored_hash: &str) -> bool {
-    use argon2::password_hash::{PasswordHash, PasswordVerifier};
-    let parsed = match PasswordHash::new(stored_hash) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    // Use params from the stored hash, not Argon2::default().
-    let params = match argon2::Params::try_from(&parsed) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    let argon2 = argon2::Argon2::new(
-        argon2::Algorithm::Argon2id,
-        argon2::Version::V0x13,
-        params,
-    );
-    argon2.verify_password(password.as_bytes(), &parsed)
-        .is_ok()
-}
-
 /// Resolve the config file path to try: explicit `--config`, or auto-discovery
 /// in the current directory, then next to the executable.
 /// `Ok(None)` means "no config file found" (only possible without `--config`).

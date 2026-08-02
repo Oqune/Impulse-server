@@ -171,7 +171,7 @@ mod storage_tests {
 
 #[cfg(test)]
 mod auth_tests {
-    use crate::config::{argon2_hash, sha256_hex};
+    use crate::crypto::sha256_hex;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
@@ -236,24 +236,18 @@ mod auth_tests {
     #[test]
     fn argon2_hash_roundtrip() {
         let password = "my_secret_password";
-        let hash = argon2_hash(password);
-
-        // The encoded hash should start with $argon2id$.
+        let hash = crate::crypto::argon2_hash(password).unwrap();
         assert!(hash.starts_with("$argon2"));
-
-        // Verify the password against the hash.
         use argon2::password_hash::{PasswordHash, PasswordVerifier};
         let parsed = PasswordHash::new(&hash).expect("should parse Argon2 hash");
-        let result = argon2::Argon2::default()
-            .verify_password(password.as_bytes(), &parsed);
+        let result = argon2::Argon2::default().verify_password(password.as_bytes(), &parsed);
         assert!(result.is_ok(), "Argon2 should verify correct password");
     }
 
     /// Argon2 with wrong password should fail verification.
     #[test]
     fn argon2_wrong_password_fails() {
-        let hash = argon2_hash("correct_password");
-
+        let hash = crate::crypto::argon2_hash("correct_password").unwrap();
         use argon2::password_hash::{PasswordHash, PasswordVerifier};
         let parsed = PasswordHash::new(&hash).expect("should parse Argon2 hash");
         let result = argon2::Argon2::default()
@@ -337,7 +331,7 @@ mod handshake_tests {
         assert_eq!(client_response.len(), 32);
 
         // Step 1: Verify password against stored Argon2 hash.
-        let hash_ok = crate::config::argon2_verify(&password, stored_argon2_hash);
+        let hash_ok = crate::crypto::argon2_verify(&password, stored_argon2_hash);
 
         // Step 2: Derive HMAC key from Argon2 output.
         let key = argon2_derive_key(&password);
@@ -354,7 +348,7 @@ mod handshake_tests {
     #[test]
     fn full_handshake_valid_password() {
         let password = "my_secret_pass";
-        let stored_hash = crate::config::argon2_hash(password);
+        let stored_hash = crate::crypto::argon2_hash(password).unwrap();
 
         let nonce: Vec<u8> = (0..16).map(|i| (i + 42) as u8).collect();
         let auth_packet = build_client_auth(password, &nonce);
@@ -367,7 +361,7 @@ mod handshake_tests {
     fn full_handshake_wrong_password() {
         let correct_password = "correct_pass";
         let wrong_password = "wrong_pass";
-        let stored_hash = crate::config::argon2_hash(correct_password);
+        let stored_hash = crate::crypto::argon2_hash(correct_password).unwrap();
 
         let nonce: Vec<u8> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let auth_packet = build_client_auth(wrong_password, &nonce);
@@ -379,7 +373,7 @@ mod handshake_tests {
     #[test]
     fn full_handshake_wrong_nonce() {
         let password = "pass123";
-        let stored_hash = crate::config::argon2_hash(password);
+        let stored_hash = crate::crypto::argon2_hash(password).unwrap();
 
         let client_nonce: Vec<u8> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let server_nonce: Vec<u8> = vec![16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
@@ -422,7 +416,7 @@ mod handshake_tests {
     #[test]
     fn brute_force_simulation() {
         let correct_password = "correct";
-        let stored_hash = crate::config::argon2_hash(correct_password);
+        let stored_hash = crate::crypto::argon2_hash(correct_password).unwrap();
         let nonce: Vec<u8> = vec![42; 16];
 
         // 5 wrong attempts.
@@ -448,7 +442,7 @@ mod handshake_tests {
 
 #[cfg(test)]
 mod integration_protocol_tests {
-    use crate::config::{argon2_hash, argon2_verify};
+    use crate::crypto::{argon2_hash, argon2_verify};
     use crate::protocol::{
         Opcode, PacketReader, PacketWriter, ProtocolError, encode_auth_challenge, encode_auth_result,
         encode_data, encode_heartbeat, encode_new_cert_hash, encode_sync_response,
@@ -540,7 +534,7 @@ mod integration_protocol_tests {
     #[test]
     fn test_auth_packet_full_wire_format() {
         let password = "integration_test_pass!";
-        let stored_hash = argon2_hash(password);
+        let stored_hash = argon2_hash(password).unwrap();
         let nonce: Vec<u8> = vec![0x5A; 16];
 
         let packet = build_client_auth(password, &nonce, &stored_hash);
@@ -574,7 +568,7 @@ mod integration_protocol_tests {
     fn test_auth_packet_boundary_conditions() {
         // a) Empty password
         let password_empty = "";
-        let stored_hash_empty = argon2_hash(password_empty);
+        let stored_hash_empty = argon2_hash(password_empty).unwrap();
         let nonce = vec![0xBB; 16];
         let packet = build_client_auth(password_empty, &nonce, &stored_hash_empty);
         let (h, n) = server_verify_auth(&packet, &stored_hash_empty, &nonce).unwrap();
@@ -583,7 +577,7 @@ mod integration_protocol_tests {
 
         // b) Unicode / multibyte password
         let password_unicode = "hello_world_123";
-        let stored_hash_unicode = argon2_hash(password_unicode);
+        let stored_hash_unicode = argon2_hash(password_unicode).unwrap();
         let nonce2 = vec![0xCC; 16];
         let packet2 = build_client_auth(password_unicode, &nonce2, &stored_hash_unicode);
         let (h2, n2) = server_verify_auth(&packet2, &stored_hash_unicode, &nonce2).unwrap();
@@ -592,7 +586,7 @@ mod integration_protocol_tests {
 
         // c) Password with null bytes
         let password_null = "hello\0world\0!";
-        let stored_hash_null = argon2_hash(password_null);
+        let stored_hash_null = argon2_hash(password_null).unwrap();
         let nonce3 = vec![0xDD; 16];
         let packet3 = build_client_auth(password_null, &nonce3, &stored_hash_null);
         let (h3, n3) = server_verify_auth(&packet3, &stored_hash_null, &nonce3).unwrap();
@@ -756,7 +750,7 @@ mod integration_protocol_tests {
     #[test]
     fn test_full_handshake_sequence() {
         let password = "full_handshake_secret";
-        let stored_hash = argon2_hash(password);
+        let stored_hash = argon2_hash(password).unwrap();
 
         // a. Server generates 16-byte nonce and sends AuthChallenge
         let server_nonce: Vec<u8> = vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
@@ -821,7 +815,7 @@ mod integration_protocol_tests {
     #[test]
     fn test_relay_multi_client_sequence() {
         let password = "relay_test_pass";
-        let stored_hash = argon2_hash(password);
+        let stored_hash = argon2_hash(password).unwrap();
         let nonce = vec![0xAA; 16];
 
         // a. All 3 clients authenticate
@@ -899,7 +893,7 @@ mod integration_protocol_tests {
     #[test]
     fn test_auth_brute_force_limit() {
         let password = "correct_password";
-        let stored_hash = argon2_hash(password);
+        let stored_hash = argon2_hash(password).unwrap();
         let nonce = vec![0x55; 16];
         let max_attempts: u32 = 5;
 
@@ -1116,7 +1110,7 @@ mod integration_protocol_tests {
     #[test]
     fn test_multiple_auth_attempts_same_session() {
         let password = "session_password";
-        let stored_hash = argon2_hash(password);
+        let stored_hash = argon2_hash(password).unwrap();
         let nonce = vec![0x77; 16];
         let max_attempts: u32 = 5;
 
@@ -1442,7 +1436,7 @@ mod combined_key_exchange_tests {
 // ═══════════════════════════════════════════════════════════════════════════════
 #[cfg(test)]
 mod e2e_integration_tests {
-    use crate::config::{argon2_hash, argon2_verify};
+    use crate::crypto::{argon2_hash, argon2_verify};
     use crate::protocol::{
         Opcode, PacketReader, PacketWriter, encode_sync_response,
     };
@@ -1542,7 +1536,7 @@ mod e2e_integration_tests {
     #[test]
     fn test_e2e_full_lifecycle() {
         let password = "e2e_test_pass";
-        let stored_hash = argon2_hash(password);
+        let stored_hash = argon2_hash(password).unwrap();
         let nonce = vec![0xBB; 16];
 
         // 1. Client1 authenticates
