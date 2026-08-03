@@ -18,6 +18,7 @@ use tracing::{debug, info, trace, warn};
 use crate::protocol::framing::{TryReadResult, try_read_packet};
 use crate::protocol::limits::{MAX_STREAM_BUFFER, MAX_TOTAL_BUFFERED_BYTES};
 use crate::protocol::encode_auth_challenge;
+use crate::relay::users::UserRegistry;
 use crate::relay::{NONCE_LEN, RelayServer, SESSION_IDLE_TIMEOUT, ServerStats, op_name};
 
 /// Lightweight snapshot of a live session, stored in the relay's session
@@ -27,6 +28,8 @@ pub struct SessionMeta {
     pub ip: IpAddr,
     pub authenticated: bool,
     pub connected_at: Instant,
+    /// Fingerprint of the bound user, once the session's first `0x0C` arrives.
+    pub user: Option<String>,
 }
 
 /// Mutable per-session state owned by the reader task.
@@ -35,11 +38,13 @@ pub struct Session {
     pub key: u64,
     pub ip: IpAddr,
     pub authenticated: bool,
+    /// Fingerprint of the bound user (set once, on the first `0x0C`).
+    pub user: Option<String>,
 }
 
 impl Session {
     pub fn new(key: u64, ip: IpAddr) -> Self {
-        Self { key, ip, authenticated: false }
+        Self { key, ip, authenticated: false, user: None }
     }
 }
 
@@ -199,11 +204,13 @@ impl RelayServer {
             ip: remote_ip,
             authenticated: false,
             connected_at: Instant::now(),
+            user: None,
         };
         self.sessions.insert(session_key, meta);
         self.stats.bump_sessions();
         self.tui.set_stats(self.sessions.len());
         self.tui.set_sessions(self.session_rows());
+        self.tui.set_users(self.user_rows());
 
         let relay = self.clone();
 
@@ -471,12 +478,15 @@ impl RelayServer {
         cleanup_session_state(
             &self.sessions,
             &self.stats,
+            &self.users,
             &self.auth_nonces,
             &self.auth_attempts,
             &self.key_exchange_store,
             session_key,
         );
         self.tui.set_stats(self.sessions.len());
+        self.tui.set_sessions(self.session_rows());
+        self.tui.set_users(self.user_rows());
     }
 }
 
@@ -486,12 +496,17 @@ impl RelayServer {
 fn cleanup_session_state(
     sessions: &DashMap<u64, SessionMeta>,
     stats: &ServerStats,
+    users: &UserRegistry,
     auth_nonces: &DashMap<u64, (Vec<u8>, Instant)>,
     auth_attempts: &DashMap<u64, AtomicU32>,
     key_exchange_store: &DashMap<u64, Vec<Vec<u8>>>,
     session_key: u64,
 ) {
-    sessions.remove(&session_key);
+    if let Some((_, meta)) = sessions.remove(&session_key) {
+        if let Some(fp) = meta.user {
+            users.release_session(&fp);
+        }
+    }
     stats.drop_session();
     auth_nonces.remove(&session_key);
     auth_attempts.remove(&session_key);
@@ -502,6 +517,7 @@ fn cleanup_session_state(
 mod tests {
     use super::{BudgetedBuffer, SessionMeta, cleanup_session_state};
     use crate::relay::ServerStats;
+    use crate::relay::users::UserRegistry;
     use dashmap::DashMap;
     use std::net::IpAddr;
     use std::sync::Arc;
@@ -514,6 +530,7 @@ mod tests {
             ip: "127.0.0.1".parse::<IpAddr>().unwrap(),
             authenticated: false,
             connected_at: Instant::now(),
+            user: None,
         };
         assert!(!m.authenticated);
         m.authenticated = true;
@@ -573,6 +590,7 @@ mod tests {
         // `handle_wt_session` after a client drops mid-session.
         let sessions: DashMap<u64, SessionMeta> = DashMap::new();
         let stats = ServerStats::new();
+        let users = UserRegistry::new();
         let auth_nonces = DashMap::new();
         let auth_attempts = DashMap::new();
         let key_exchange_store = DashMap::new();
@@ -584,6 +602,7 @@ mod tests {
                 ip: "127.0.0.1".parse::<IpAddr>().unwrap(),
                 authenticated: false,
                 connected_at: Instant::now(),
+                user: None,
             },
         );
         stats.bump_sessions();
@@ -595,6 +614,7 @@ mod tests {
         cleanup_session_state(
             &sessions,
             &stats,
+            &users,
             &auth_nonces,
             &auth_attempts,
             &key_exchange_store,
@@ -602,5 +622,46 @@ mod tests {
         );
         assert_eq!(sessions.len(), 0);
         assert_eq!(stats.sessions.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn cleanup_releases_user_registry_session() {
+        let users = UserRegistry::new();
+        let sessions: DashMap<u64, SessionMeta> = DashMap::new();
+        let stats = ServerStats::new();
+        let auth_nonces = DashMap::new();
+        let auth_attempts = DashMap::new();
+        let key_exchange_store = DashMap::new();
+
+        // Session connects, authenticates, and binds to user "deadbeef" (as
+        // the 0x0C handler does via bind_session).
+        let fp = "deadbeefcafebabe0123456789abcdef".to_string();
+        sessions.insert(
+            9,
+            SessionMeta {
+                ip: "127.0.0.1".parse::<IpAddr>().unwrap(),
+                authenticated: true,
+                connected_at: Instant::now(),
+                user: Some(fp.clone()),
+            },
+        );
+        users.bind_session(&fp);
+        assert!(users.rows()[0].online);
+
+        // Disconnect: the user's session must be released, not leaked.
+        cleanup_session_state(
+            &sessions,
+            &stats,
+            &users,
+            &auth_nonces,
+            &auth_attempts,
+            &key_exchange_store,
+            9,
+        );
+        assert_eq!(sessions.len(), 0);
+        let row = &users.rows()[0];
+        assert!(!row.online);
+        assert!(row.total_online >= Duration::ZERO);
+        assert_eq!(row.connected_at, None);
     }
 }

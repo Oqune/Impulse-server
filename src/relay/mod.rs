@@ -117,6 +117,8 @@ pub struct RelayServer {
     stats: Arc<ServerStats>,
     /// Stored key exchange packets per session, replayed to newly authenticated peers.
     key_exchange_store: Arc<DashMap<u64, Vec<Vec<u8>>>>,
+    /// Ephemeral user registry (spec: user system) keyed by public-key hash.
+    users: Arc<users::UserRegistry>,
     /// Maximum age of a challenge nonce before it is discarded.
     nonce_max_age: Duration,
 }
@@ -185,6 +187,7 @@ impl RelayServer {
             next_session_id: Arc::new(AtomicU64::new(0)),
             stats,
             key_exchange_store: Arc::new(DashMap::new()),
+            users: Arc::new(users::UserRegistry::new()),
             nonce_max_age: NONCE_MAX_AGE,
         };
 
@@ -390,14 +393,25 @@ impl RelayServer {
     fn session_rows(&self) -> Vec<crate::ui::view::SessionRow> {
         self.sessions
             .iter()
-            .map(|entry| crate::ui::view::SessionRow {
-                key: *entry.key(),
-                ip: entry.value().ip,
-                authenticated: entry.value().authenticated,
-                // User binding lands in a later task; always None for now.
-                user: None,
-                connected_at: entry.value().connected_at,
+            .map(|entry| {
+                let user = entry
+                    .value()
+                    .user
+                    .as_deref()
+                    .and_then(|fp| self.users.alias_of(fp));
+                crate::ui::view::SessionRow {
+                    key: *entry.key(),
+                    ip: entry.value().ip,
+                    authenticated: entry.value().authenticated,
+                    user,
+                    connected_at: entry.value().connected_at,
+                }
             })
             .collect()
+    }
+
+    /// Snapshot the user registry as rows for the TUI users panel.
+    fn user_rows(&self) -> Vec<crate::ui::view::UserRow> {
+        self.users.rows()
     }
 }

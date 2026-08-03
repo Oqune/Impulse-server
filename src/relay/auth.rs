@@ -255,6 +255,11 @@ pub(crate) async fn process_packet(
                     debug!("[DATA] Session {} broadcast OK to {} receivers", session_key, n);
                     relay.stats.relayed_msgs.fetch_add(1, Ordering::Relaxed);
                     relay.stats.relayed_bytes.fetch_add(payload.len(), Ordering::Relaxed);
+                    // Attribute authorship to the bound user (metadata only).
+                    if let Some(fp) = &session.user {
+                        relay.users.record_message(fp);
+                        relay.tui.set_users(relay.user_rows());
+                    }
                 }
                 Err(_) => debug!("[DATA] Session {} broadcast: no receivers", session_key),
             }
@@ -306,6 +311,23 @@ pub(crate) async fn process_packet(
                 .or_default()
                 .push(packet);
             debug!("[KEYEX] Session {} relayed combined KEM+DSA to all peers", session_key);
+            // Derive the user identity from the KEM public key (no wire change).
+            // First 0x0C of a session binds it to the user; a re-sent 0x0C
+            // (peer key request) only refreshes last_seen.
+            if session.user.is_none() {
+                if let Some(fp) = crate::relay::users::fingerprint_of_keyexchange(packet_data) {
+                    let alias = relay.users.bind_session(&fp);
+                    session.user = Some(fp);
+                    relay.tui.set_users(relay.user_rows());
+                    debug!(
+                        "[KEYEX] Session {} bound to user {}",
+                        session_key, alias
+                    );
+                }
+            } else if let Some(fp) = &session.user {
+                relay.users.touch(fp);
+                relay.tui.set_users(relay.user_rows());
+            }
             Ok(())
         }
         Opcode::Disconnect => {

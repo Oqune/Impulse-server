@@ -93,6 +93,7 @@ impl RelayServer {
                 self.stats.sessions.store(sessions, Ordering::Relaxed);
                 self.tui.set_stats(sessions);
                 self.tui.set_sessions(self.session_rows());
+                self.tui.set_users(self.user_rows());
             }
         });
     }
