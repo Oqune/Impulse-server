@@ -173,9 +173,17 @@ pub(crate) fn draw(
             return;
         }
 
+        // Split off the status bar at the bottom.
+        let v = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .split(area);
+        let main_area = v[0];
+        let status_area = v[1];
+
         if state.panel_mode == PanelMode::Hidden {
             // Left column hidden: logs span full width.
-            draw_logs(f, area, &filtered, state);
+            draw_logs(f, main_area, &filtered, state);
         } else {
             match layout_tier(area.width, area.height) {
                 LayoutTier::ThreeColumn => {
@@ -187,7 +195,7 @@ pub(crate) fn draw(
                             Constraint::Length(MIDDLE_COL_WIDTH),
                             Constraint::Min(30),
                         ])
-                        .split(area);
+                        .split(main_area);
                     draw_left_column(f, cols[0], state, info, stats, cert);
                     draw_middle_column(f, cols[1], users, sessions);
                     draw_logs(f, cols[2], &filtered, state);
@@ -197,18 +205,18 @@ pub(crate) fn draw(
                     let cols = Layout::default()
                         .direction(Direction::Horizontal)
                         .constraints([Constraint::Length(LEFT_COL_WIDTH), Constraint::Min(30)])
-                        .split(area);
+                        .split(main_area);
                     draw_left_column(f, cols[0], state, info, stats, cert);
                     draw_right_column(f, cols[1], users, sessions, &filtered, state);
                 }
                 LayoutTier::Compact => {
                     // logs + status bar only
-                    draw_logs(f, area, &filtered, state);
+                    draw_logs(f, main_area, &filtered, state);
                 }
             }
         }
 
-        draw_status_bar(f, area, state, stats, info, has_clipboard, filtered_total, throughput);
+        draw_status_bar(f, status_area, state, stats, info, has_clipboard, filtered_total, throughput);
     })?;
     Ok(())
 }
