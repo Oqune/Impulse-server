@@ -12,6 +12,7 @@ pub mod auth;
 pub mod housekeeping;
 pub mod session;
 pub mod stats;
+pub mod users;
 
 pub use session::SessionMeta;
 pub use stats::ServerStats;
