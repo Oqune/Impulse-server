@@ -19,7 +19,7 @@ use tracing::Level;
 
 use crate::relay::ServerStats;
 use crate::ui::draw::{copy_logs_to_clipboard, draw};
-use crate::ui::view::{CertView, LogRecord, ServerInfo, SessionRow};
+use crate::ui::view::{CertView, LogRecord, ServerInfo, SessionRow, UserRow};
 
 /// Max number of log lines retained for the TUI (spec §3: 500 → 2000).
 const MAX_LOG_LINES: usize = 2000;
@@ -104,6 +104,7 @@ pub struct TuiHandle {
     info: Arc<Mutex<ServerInfo>>,
     stats: Arc<ServerStats>,
     sessions: Arc<Mutex<Vec<SessionRow>>>,
+    users: Arc<Mutex<Vec<UserRow>>>,
     shutdown: Arc<tokio::sync::Notify>,
 }
 
@@ -128,6 +129,10 @@ impl TuiHandle {
         *self.sessions.lock().unwrap_or_else(|e| e.into_inner()) = rows;
     }
 
+    pub fn set_users(&self, rows: Vec<UserRow>) {
+        *self.users.lock().unwrap_or_else(|e| e.into_inner()) = rows;
+    }
+
     pub fn stats_handle(&self) -> Arc<ServerStats> {
         self.stats.clone()
     }
@@ -144,6 +149,7 @@ pub(crate) fn run_tui(
     info: Arc<Mutex<ServerInfo>>,
     stats: Arc<ServerStats>,
     sessions: Arc<Mutex<Vec<SessionRow>>>,
+    users: Arc<Mutex<Vec<UserRow>>>,
     shutdown: Arc<tokio::sync::Notify>,
     init_tx: crossbeam_channel::Sender<anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
@@ -233,6 +239,7 @@ pub(crate) fn run_tui(
             let cert = cert.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let info = info.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let sessions = sessions.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let users = users.lock().unwrap_or_else(|e| e.into_inner()).clone();
             draw(
                 &mut terminal,
                 &logs,
@@ -240,6 +247,7 @@ pub(crate) fn run_tui(
                 &info,
                 &stats,
                 &sessions,
+                &users,
                 &state,
                 has_clipboard,
                 throughput,
@@ -366,11 +374,13 @@ pub fn spawn_tui(initial: CertView, shutdown: Arc<tokio::sync::Notify>) -> anyho
     let info = Arc::new(Mutex::new(ServerInfo::default()));
     let stats = Arc::new(ServerStats::new());
     let sessions = Arc::new(Mutex::new(Vec::new()));
+    let users = Arc::new(Mutex::new(Vec::new()));
 
     let cert_clone = cert.clone();
     let info_clone = info.clone();
     let stats_clone = stats.clone();
     let sessions_clone = sessions.clone();
+    let users_clone = users.clone();
     let shutdown_clone = shutdown.clone();
 
     let (init_tx, init_rx) = crossbeam_channel::bounded::<anyhow::Result<()>>(1);
@@ -381,7 +391,7 @@ pub fn spawn_tui(initial: CertView, shutdown: Arc<tokio::sync::Notify>) -> anyho
         // no Ok(()) was sent; propagate the error so spawn_tui does not return a
         // live handle for a TUI that never started.
         let init_tx2 = init_tx.clone();
-        if let Err(e) = run_tui(log_rx, cert_clone, info_clone, stats_clone, sessions_clone, shutdown_clone, init_tx) {
+        if let Err(e) = run_tui(log_rx, cert_clone, info_clone, stats_clone, sessions_clone, users_clone, shutdown_clone, init_tx) {
             let _ = init_tx2.send(Err(e));
         }
     });
@@ -398,6 +408,7 @@ pub fn spawn_tui(initial: CertView, shutdown: Arc<tokio::sync::Notify>) -> anyho
         info,
         stats,
         sessions,
+        users,
         shutdown,
     })
 }

@@ -19,7 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use tracing::Level;
 
-use crate::ui::view::{CertView, LogRecord, ServerInfo, SessionRow, ServerStats};
+use crate::ui::view::{CertView, LogRecord, ServerInfo, SessionRow, UserRow, ServerStats};
 use crate::ui::view::{compute_scroll, fmt_duration};
 use crate::ui::{PanelMode, TuiState};
 
@@ -121,10 +121,13 @@ pub(crate) fn draw(
     info: &ServerInfo,
     stats: &ServerStats,
     sessions: &[SessionRow],
+    users: &[UserRow],
     state: &TuiState,
     has_clipboard: bool,
     throughput: u64,
 ) -> anyhow::Result<()> {
+    // The Users panel consumes this in a later task.
+    let _ = users;
     terminal.draw(|f| {
         let area = f.area();
         let full = area.width >= 90 && area.height >= 24;
