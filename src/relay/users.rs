@@ -20,8 +20,6 @@ use crate::ui::view::UserRow;
 /// `[0x0C] [u32 inner_len] [u32 kem_len] [kem] [u32 dsa_len] [dsa]`.
 /// Returns `None` for non-`0x0C` or malformed frames.
 pub fn fingerprint_of_keyexchange(packet: &[u8]) -> Option<String> {
-    use sha2::{Digest, Sha256};
-
     if packet.len() < 13 || packet[0] != Opcode::KeyExchangeKemDsa.as_u8() {
         return None;
     }
@@ -37,10 +35,8 @@ pub fn fingerprint_of_keyexchange(packet: &[u8]) -> Option<String> {
         return None;
     }
     let kem = &packet[9..kem_end];
-    let digest = Sha256::digest(kem);
-    // Same lowercase-hex formatting as Cert::fingerprint_of (cert/mod.rs:68).
-    let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-    Some(hex[..32].to_string())
+    // Same lowercase-hex digest as the client's fingerprintForBytes.
+    Some(crate::crypto::sha256_hex_bytes(kem)[..32].to_string())
 }
 
 /// Per-user stats, keyed by fingerprint. Lives for the server's lifetime.
@@ -105,8 +101,10 @@ impl UserRegistry {
         }
     }
 
-    /// Close the earliest active session for `fingerprint`: accumulate its
-    /// online time and drop `active_sessions`. No-op if the user is unknown.
+    /// Close the most recently opened active session for `fingerprint`:
+    /// accumulate its online time and drop `active_sessions`. No-op if the
+    /// user is unknown. Aggregate `total_online` is invariant to *which*
+    /// session is popped, so LIFO is fine for the multi-session case.
     pub fn release_session(&self, fingerprint: &str) {
         let now = Instant::now();
         if let Some(mut entry) = self.users.get_mut(fingerprint) {

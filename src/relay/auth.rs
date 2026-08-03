@@ -332,7 +332,7 @@ pub(crate) async fn process_packet(
         }
         Opcode::Disconnect => {
             info!("[DISCONNECT] Session {} disconnecting", session_key);
-            return Err(anyhow::anyhow!("client disconnected"));
+            Err(anyhow::anyhow!("client disconnected"))
         }
         // Server→client opcodes never reach this function (see the module doc);
         // kept only for match exhaustiveness.

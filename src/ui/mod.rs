@@ -142,8 +142,9 @@ impl TuiHandle {
     }
 }
 
-/// Run the TUI loop on the current thread until the user quits (Ctrl+C / 'q').
-pub(crate) fn run_tui(
+/// Channels and shared state handed to the TUI thread. Kept in one struct so
+/// `run_tui` stays under clippy's argument-count limit.
+pub(crate) struct TuiInputs {
     log_rx: crossbeam_channel::Receiver<LogRecord>,
     cert: Arc<Mutex<CertView>>,
     info: Arc<Mutex<ServerInfo>>,
@@ -152,7 +153,20 @@ pub(crate) fn run_tui(
     users: Arc<Mutex<Vec<UserRow>>>,
     shutdown: Arc<tokio::sync::Notify>,
     init_tx: crossbeam_channel::Sender<anyhow::Result<()>>,
-) -> anyhow::Result<()> {
+}
+
+/// Run the TUI loop on the current thread until the user quits (Ctrl+C / 'q').
+pub(crate) fn run_tui(inputs: TuiInputs) -> anyhow::Result<()> {
+    let TuiInputs {
+        log_rx,
+        cert,
+        info,
+        stats,
+        sessions,
+        users,
+        shutdown,
+        init_tx,
+    } = inputs;
     let mut stdout: Stdout = std::io::stdout();
     terminal::enable_raw_mode()?;
     crossterm::execute!(
@@ -240,18 +254,18 @@ pub(crate) fn run_tui(
             let info = info.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let sessions = sessions.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let users = users.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            draw(
-                &mut terminal,
-                &logs,
-                &cert,
-                &info,
-                &stats,
-                &sessions,
-                &users,
-                &state,
+            let ctx = draw::UiContext {
+                logs: &logs,
+                cert: &cert,
+                info: &info,
+                stats: &stats,
+                sessions: &sessions,
+                users: &users,
+                state: &state,
                 has_clipboard,
                 throughput,
-            )?;
+            };
+            draw(&mut terminal, &ctx)?;
         }
     }
 
@@ -391,7 +405,17 @@ pub fn spawn_tui(initial: CertView, shutdown: Arc<tokio::sync::Notify>) -> anyho
         // no Ok(()) was sent; propagate the error so spawn_tui does not return a
         // live handle for a TUI that never started.
         let init_tx2 = init_tx.clone();
-        if let Err(e) = run_tui(log_rx, cert_clone, info_clone, stats_clone, sessions_clone, users_clone, shutdown_clone, init_tx) {
+        let inputs = TuiInputs {
+            log_rx,
+            cert: cert_clone,
+            info: info_clone,
+            stats: stats_clone,
+            sessions: sessions_clone,
+            users: users_clone,
+            shutdown: shutdown_clone,
+            init_tx,
+        };
+        if let Err(e) = run_tui(inputs) {
             let _ = init_tx2.send(Err(e));
         }
     });

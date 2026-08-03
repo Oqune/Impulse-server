@@ -1,9 +1,9 @@
 //! TUI rendering: layout, panels, log viewport, QR, status bar.
 //!
 //! Responsive layout (spec: three-column redesign):
-//!   >=125 cols × >=24 rows: Server|QR|Cert | Users + Sessions | Logs
-//!   90..124 cols × >=24 rows: Server|QR|Cert | Users + Sessions + Logs
-//!   otherwise: logs + status bar only
+//! * at least 125 cols and 24 rows: Server/QR/Cert | Users + Sessions | Logs
+//! * 90..124 cols and 24 rows: Server/QR/Cert | Users + Sessions + Logs
+//! * otherwise: logs + status bar only
 
 use std::io::Stdout;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -145,31 +145,37 @@ fn centered_rect(width: u16, height: u16, r: Rect) -> Rect {
     }
 }
 
+/// Bundled per-frame rendering inputs, kept together so `draw` and
+/// `draw_status_bar` stay under clippy's argument-count limit.
+pub(crate) struct UiContext<'a> {
+    pub logs: &'a [LogRecord],
+    pub cert: &'a CertView,
+    pub info: &'a ServerInfo,
+    pub stats: &'a ServerStats,
+    pub sessions: &'a [SessionRow],
+    pub users: &'a [UserRow],
+    pub state: &'a TuiState,
+    pub has_clipboard: bool,
+    pub throughput: u64,
+}
+
 pub(crate) fn draw(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    logs: &[LogRecord],
-    cert: &CertView,
-    info: &ServerInfo,
-    stats: &ServerStats,
-    sessions: &[SessionRow],
-    users: &[UserRow],
-    state: &TuiState,
-    has_clipboard: bool,
-    throughput: u64,
+    ctx: &UiContext<'_>,
 ) -> anyhow::Result<()> {
     terminal.draw(|f| {
         let area = f.area();
-        let filtered: Vec<&LogRecord> = logs.iter().filter(|r| state.level_visible(&r.level)).collect();
+        let filtered: Vec<&LogRecord> = ctx.logs.iter().filter(|r| ctx.state.level_visible(&r.level)).collect();
         let filtered_total = filtered.len();
 
         // `f` — QR full-screen (spec §3): QR over everything except the status bar.
-        if state.qr_focus {
+        if ctx.state.qr_focus {
             let v = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(3), Constraint::Length(1)])
                 .split(area);
-            draw_qr(f, v[0], cert);
-            draw_status_bar(f, v[1], state, stats, info, has_clipboard, filtered_total, throughput);
+            draw_qr(f, v[0], ctx.cert);
+            draw_status_bar(f, v[1], ctx, filtered_total);
             return;
         }
 
@@ -181,9 +187,9 @@ pub(crate) fn draw(
         let main_area = v[0];
         let status_area = v[1];
 
-        if state.panel_mode == PanelMode::Hidden {
+        if ctx.state.panel_mode == PanelMode::Hidden {
             // Left column hidden: logs span full width.
-            draw_logs(f, main_area, &filtered, state);
+            draw_logs(f, main_area, &filtered, ctx.state);
         } else {
             match layout_tier(area.width, area.height) {
                 LayoutTier::ThreeColumn => {
@@ -196,9 +202,9 @@ pub(crate) fn draw(
                             Constraint::Min(30),
                         ])
                         .split(main_area);
-                    draw_left_column(f, cols[0], state, info, stats, cert);
-                    draw_middle_column(f, cols[1], users, sessions);
-                    draw_logs(f, cols[2], &filtered, state);
+                    draw_left_column(f, cols[0], ctx.state, ctx.info, ctx.stats, ctx.cert);
+                    draw_middle_column(f, cols[1], ctx.users, ctx.sessions);
+                    draw_logs(f, cols[2], &filtered, ctx.state);
                 }
                 LayoutTier::TwoColumn => {
                     // Server/QR/Cert | Users + Sessions + Logs
@@ -206,17 +212,17 @@ pub(crate) fn draw(
                         .direction(Direction::Horizontal)
                         .constraints([Constraint::Length(LEFT_COL_WIDTH), Constraint::Min(30)])
                         .split(main_area);
-                    draw_left_column(f, cols[0], state, info, stats, cert);
-                    draw_right_column(f, cols[1], users, sessions, &filtered, state);
+                    draw_left_column(f, cols[0], ctx.state, ctx.info, ctx.stats, ctx.cert);
+                    draw_right_column(f, cols[1], ctx.users, ctx.sessions, &filtered, ctx.state);
                 }
                 LayoutTier::Compact => {
                     // logs + status bar only
-                    draw_logs(f, main_area, &filtered, state);
+                    draw_logs(f, main_area, &filtered, ctx.state);
                 }
             }
         }
 
-        draw_status_bar(f, status_area, state, stats, info, has_clipboard, filtered_total, throughput);
+        draw_status_bar(f, status_area, ctx, filtered_total);
     })?;
     Ok(())
 }
@@ -360,7 +366,8 @@ fn draw_left_column(
     }
 }
 
-/// Middle column (three-column mode): Users on top, Sessions below.
+/// Middle column (three-column mode): Users on top (gets most of the space),
+/// Sessions below (fixed-height table).
 fn draw_middle_column(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -369,7 +376,7 @@ fn draw_middle_column(
 ) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Min(5)])
+        .constraints([Constraint::Min(10), Constraint::Length(8)])
         .split(area);
     draw_users(f, rows[0], users);
     draw_sessions(f, rows[1], sessions);
@@ -432,7 +439,7 @@ fn draw_right_column(
 ) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Length(8), Constraint::Min(5)])
+        .constraints([Constraint::Min(8), Constraint::Length(8), Constraint::Min(5)])
         .split(area);
     draw_users(f, rows[0], users);
     draw_sessions(f, rows[1], sessions);
@@ -514,7 +521,7 @@ fn draw_logs(f: &mut ratatui::Frame, area: Rect, filtered: &[&LogRecord], state:
 
 /// Split a log message into spans, highlighting every case-insensitive match of
 /// the active search query (spec §3 `/` search).
-fn message_spans<'a>(rec: &'a LogRecord, query: Option<&str>, base: Style) -> Vec<Span<'static>> {
+fn message_spans(rec: &LogRecord, query: Option<&str>, base: Style) -> Vec<Span<'static>> {
     let query = match query {
         Some(q) if !q.is_empty() => q.to_lowercase(),
         _ => return vec![Span::styled(rec.message.clone(), base)],
@@ -561,14 +568,13 @@ fn message_spans<'a>(rec: &'a LogRecord, query: Option<&str>, base: Style) -> Ve
 fn draw_status_bar(
     f: &mut ratatui::Frame,
     area: Rect,
-    state: &TuiState,
-    stats: &ServerStats,
-    info: &ServerInfo,
-    has_clipboard: bool,
+    ctx: &UiContext<'_>,
     filtered_total: usize,
-    throughput: u64,
 ) {
     let relaxed = std::sync::atomic::Ordering::Relaxed;
+    let state = ctx.state;
+    let stats = ctx.stats;
+    let info = ctx.info;
     let mut spans: Vec<Span> = Vec::new();
     spans.push(Span::styled("● LIVE  ", Style::default().fg(THEME.ok)));
     spans.push(Span::styled(
@@ -584,7 +590,7 @@ fn draw_status_bar(
         Style::default().fg(THEME.value),
     ));
     spans.push(Span::styled(
-        format!("↑ {}/s  ", fmt_bytes(throughput)),
+        format!("↑ {}/s  ", fmt_bytes(ctx.throughput)),
         Style::default().fg(THEME.ok),
     ));
     spans.push(Span::styled(
@@ -619,7 +625,7 @@ fn draw_status_bar(
             Style::default().fg(THEME.dim),
         ));
     }
-    if has_clipboard {
+    if ctx.has_clipboard {
         spans.push(Span::styled("Shift+C copy", Style::default().fg(THEME.dim)));
     }
     if state.search_active() {

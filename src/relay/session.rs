@@ -502,10 +502,10 @@ fn cleanup_session_state(
     key_exchange_store: &DashMap<u64, Vec<Vec<u8>>>,
     session_key: u64,
 ) {
-    if let Some((_, meta)) = sessions.remove(&session_key) {
-        if let Some(fp) = meta.user {
-            users.release_session(&fp);
-        }
+    if let Some((_, meta)) = sessions.remove(&session_key)
+        && let Some(fp) = meta.user
+    {
+        users.release_session(&fp);
     }
     stats.drop_session();
     auth_nonces.remove(&session_key);

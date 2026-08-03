@@ -13,6 +13,12 @@ pub fn sha256_hex(input: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// SHA-256 hex of arbitrary bytes (used by `relay::users` for fingerprints).
+pub fn sha256_hex_bytes(input: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(input))
+}
+
 /// Argon2id hash of a string (used by --hash-password).
 pub fn argon2_hash(input: &str) -> anyhow::Result<String> {
     use argon2::password_hash::{PasswordHasher, SaltString};
