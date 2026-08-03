@@ -323,6 +323,7 @@ fn draw_cert_info(f: &mut ratatui::Frame, area: Rect, cert: &CertView) {
 }
 
 fn draw_sessions(f: &mut ratatui::Frame, area: Rect, sessions: &[SessionRow]) {
+    let now = std::time::Instant::now();
     let mut lines: Vec<Line> = Vec::new();
     for row in sessions.iter().take(100) {
         let auth = if row.authenticated {
@@ -330,12 +331,20 @@ fn draw_sessions(f: &mut ratatui::Frame, area: Rect, sessions: &[SessionRow]) {
         } else {
             Span::styled("·", Style::default().fg(THEME.dim))
         };
+        // Age is computed live per frame so it never freezes between the 60 s
+        // housekeeping pushes (spec §3 fix 2).
+        let age = fmt_duration(now.saturating_duration_since(row.connected_at).as_secs());
+        let user_tag = match &row.user {
+            Some(alias) => Span::styled(format!("{alias} "), Style::default().fg(THEME.header)),
+            None => Span::raw(""),
+        };
         lines.push(Line::from(vec![
             Span::styled(format!("{:4}  ", row.key), Style::default().fg(THEME.dim)),
             Span::styled(format!("{:<16}", row.ip.to_string()), Style::default().fg(THEME.value)),
             Span::raw("  "),
             auth,
-            Span::styled(format!("  {:>8}", fmt_duration(row.age.as_secs())), Style::default().fg(THEME.dim)),
+            user_tag,
+            Span::styled(format!("  {:>8}", age), Style::default().fg(THEME.dim)),
         ]));
     }
     if lines.is_empty() {

@@ -393,7 +393,9 @@ impl RelayServer {
                 key: *entry.key(),
                 ip: entry.value().ip,
                 authenticated: entry.value().authenticated,
-                age: entry.value().connected_at.elapsed(),
+                // User binding lands in a later task; always None for now.
+                user: None,
+                connected_at: entry.value().connected_at,
             })
             .collect()
     }
