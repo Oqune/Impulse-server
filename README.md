@@ -49,17 +49,23 @@ Key design points:
   count (`10_000`) and per-payload size (`1 MB`).
 - **Relay:** broadcast to all active sessions; late joiners catch up via
   `Sync { last_seen_id }`. A single `Sync` returns at most `2000` messages.
-- **Admin:** a **TUI** with a two-column layout:
+- **Admin:** a **TUI** with a responsive three-column layout:
   - **Left column** (Info + QR + Certificate): server bind address, transport
     (`WebTransport/QUIC TLS1.3 (h3)`), crate version, SAN count, live
     `sessions / MAX_SESSIONS`, stored message count, message TTL, max payload
     size, certificate SHA-256 fingerprint (short), cert expiry countdown, a
     ⚠ rotating indicator during key overlap, and a scannable QR code.
-  - **Right column** (Sessions on top, Logs below): live server log stream with
-    level filters `1`–`5` (ERR/WRN/INF/DBG/TRC), scroll (`↑↓`/`PgUp`/`PgDn`/`Home`/`End`
-    or mouse wheel), search (`/`), `Space` to pause, and `Shift+C` to copy all
-    logs to clipboard. `Tab` cycles Server/Sessions panels; `f` focuses the QR
-    code. The status bar shows live throughput, uptime, active filters and hints.
+  - **Middle column** (Users on top, Sessions below): every user ever seen —
+    `U{n}` alias, first 8 hex of the client public-key fingerprint, ● online /
+    ○ offline, live total online time and messages sent — plus the live session
+    table, each row tagged with its bound user alias.
+  - **Right column** (Logs, widest): live server log stream with level filters
+    `1`–`5` (ERR/WRN/INF/DBG/TRC), scroll (`↑↓`/`PgUp`/`PgDn`/`Home`/`End` or
+    mouse wheel), search (`/`), `Space` to pause, and `Shift+C` to copy all logs
+    to clipboard. `Tab` cycles the left column (full → QR-only → hidden); `f`
+    focuses the QR code. Below ~125 columns the middle column folds into the
+    right (Users + Sessions + Logs); below ~90 columns only the logs remain.
+    The status bar shows live throughput, uptime, active filters and hints.
   `Ctrl+C` / `q` quits and shuts down gracefully.
 
 ## Build & run

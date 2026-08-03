@@ -9,7 +9,9 @@
 //! * `crypto` — Argon2id password hashing + verification (auth chain).
 //! * `relay` — WebTransport endpoint, session handling, broadcast relay,
 //!   auth handshake (`relay::auth`), and housekeeping (`relay::housekeeping`).
-//! * `ui` — terminal UI: Server/Sessions panels, TOFU QR, live stats, log view.
+//!   `relay::users` tracks per-user stats keyed by the KEM public-key hash.
+//! * `ui` — terminal UI: Server/Users/Sessions panels, TOFU QR, live stats,
+//!   log view.
 //! * `config` — configuration resolution (`mod`), CLI parsing (`cli`), file
 //!   loading (`file`).
 //! * `cli` — first-run / `--init` interactive wizards and config writing.
