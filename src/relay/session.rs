@@ -208,7 +208,8 @@ impl RelayServer {
         let relay = self.clone();
 
         // Task: forward broadcast messages AND direct responses to this session's send stream.
-        let mut writer_task = tokio::spawn(async move {
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async move {
             loop {
                 tokio::select! {
                     result = data_sub.recv() => {
@@ -310,11 +311,11 @@ impl RelayServer {
         });
 
         // Task: read length-prefixed binary packets from the client.
-        let mut reader_task = {
+        {
             let this = self.clone();
             let direct_tx = direct_tx.clone();
             let mut session = Session::new(session_key, remote_ip);
-            tokio::spawn(async move {
+            tasks.spawn(async move {
                 let mut buf = BudgetedBuffer::new(&this.stats.buffered_bytes);
                 let mut chunk = [0u8; 8192];
 
@@ -455,18 +456,17 @@ impl RelayServer {
                 // If this cleanup is never reached (task aborted), `Drop` on
                 // `BudgetedBuffer` reconciles the same bytes.
                 buf.reconcile();
-            })
+            });
         };
 
         // Wait for the first task to finish, then abort the other so no task
         // is orphaned; the session-registry entry + semaphore permit are
-        // released only after both have stopped (Bug 1).
-        tokio::select! {
-            _ = &mut writer_task => reader_task.abort(),
-            _ = &mut reader_task => writer_task.abort(),
-        }
-        let _ = writer_task.await;
-        let _ = reader_task.await;
+        // released only after both have stopped (Bug 1). `JoinSet` collects
+        // each task's output exactly once, so awaiting a finished task here
+        // can never double-poll a `JoinHandle`.
+        let _ = tasks.join_next().await;
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
 
         cleanup_session_state(
             &self.sessions,
