@@ -1193,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "impulse-server"
-version = "2.7.1"
+version = "2.7.2"
 dependencies = [
  "anyhow",
  "argon2",
