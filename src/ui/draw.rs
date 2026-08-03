@@ -366,8 +366,8 @@ fn draw_left_column(
     }
 }
 
-/// Middle column (three-column mode): Users on top (gets most of the space),
-/// Sessions below (fixed-height table).
+/// Middle column (three-column mode): Users and Sessions split the column
+/// evenly.
 fn draw_middle_column(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -376,7 +376,7 @@ fn draw_middle_column(
 ) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(10), Constraint::Length(8)])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
     draw_users(f, rows[0], users);
     draw_sessions(f, rows[1], sessions);
