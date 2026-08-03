@@ -1,11 +1,9 @@
 //! TUI rendering: layout, panels, log viewport, QR, status bar.
 //!
-//! Layout (full, ≥ ~90 cols × ~26 rows):
-//!   Server | Sessions    (left / right-top, compact)
-//!   QR     | Logs        (left / right-bottom)
-//!   Cert   |
-//!   Status bar (full width)
-//! Compact (<90 cols or <24 rows): logs + status bar only.
+//! Responsive layout (spec: three-column redesign):
+//!   >=125 cols × >=24 rows: Server|QR|Cert | Users + Sessions | Logs
+//!   90..124 cols × >=24 rows: Server|QR|Cert | Users + Sessions + Logs
+//!   otherwise: logs + status bar only
 
 use std::io::Stdout;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,11 +18,41 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use tracing::Level;
 
 use crate::ui::view::{CertView, LogRecord, ServerInfo, SessionRow, UserRow, ServerStats};
-use crate::ui::view::{compute_scroll, fmt_duration};
+use crate::ui::view::{compute_scroll, fmt_duration, live_total_online};
 use crate::ui::{PanelMode, TuiState};
 
-/// Single palette for the whole UI (spec §3 Appearance).
-pub const THEME: UiTheme = UiTheme::dark();
+/// Left column width (Server/QR/Cert) in the full layout.
+const LEFT_COL_WIDTH: u16 = 42;
+/// Middle column width (Users + Sessions) in the three-column layout.
+const MIDDLE_COL_WIDTH: u16 = 44;
+/// Minimum width for the three-column layout (two-column below this).
+const THREE_COL_MIN_WIDTH: u16 = 125;
+/// Minimum width for the full (non-compact) layout.
+const FULL_MIN_WIDTH: u16 = 90;
+/// Minimum height for the full (non-compact) layout.
+const FULL_MIN_HEIGHT: u16 = 24;
+
+/// Which column tier to render for a given terminal size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutTier {
+    /// Logs + status bar only (< 90 cols or < 24 rows).
+    Compact,
+    /// Left column + right column (Users + Sessions + Logs).
+    TwoColumn,
+    /// Left + middle (Users + Sessions) + right (Logs).
+    ThreeColumn,
+}
+
+/// Pure decision helper so the responsive thresholds are unit-testable.
+pub fn layout_tier(width: u16, height: u16) -> LayoutTier {
+    if width < FULL_MIN_WIDTH || height < FULL_MIN_HEIGHT {
+        LayoutTier::Compact
+    } else if width >= THREE_COL_MIN_WIDTH {
+        LayoutTier::ThreeColumn
+    } else {
+        LayoutTier::TwoColumn
+    }
+}
 
 pub struct UiTheme {
     pub border: Color,
@@ -55,6 +83,9 @@ impl UiTheme {
         }
     }
 }
+
+/// Single palette for the whole UI (spec §3 Appearance).
+pub const THEME: UiTheme = UiTheme::dark();
 
 pub fn level_style(level: Level) -> (Color, &'static str) {
     match level {
@@ -126,11 +157,8 @@ pub(crate) fn draw(
     has_clipboard: bool,
     throughput: u64,
 ) -> anyhow::Result<()> {
-    // The Users panel consumes this in a later task.
-    let _ = users;
     terminal.draw(|f| {
         let area = f.area();
-        let full = area.width >= 90 && area.height >= 24;
         let filtered: Vec<&LogRecord> = logs.iter().filter(|r| state.level_visible(&r.level)).collect();
         let filtered_total = filtered.len();
 
@@ -145,65 +173,42 @@ pub(crate) fn draw(
             return;
         }
 
-        if !full {
-            // Compact: logs + status bar.
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(3), Constraint::Length(1)])
-                .split(area);
-            draw_logs(f, rows[0], &filtered, state);
-            draw_status_bar(f, rows[1], state, stats, info, has_clipboard, filtered_total, throughput);
-            return;
-        }
-
-        // Full: left column (Server/QR/Cert), right column (Sessions + Logs), bottom (Status bar).
-        // First split off the status bar at the bottom.
-        let v = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(1)])
-            .split(area);
-
-        let main_area = v[0];
-        let status_area = v[1];
-
         if state.panel_mode == PanelMode::Hidden {
             // Left column hidden: logs span full width.
-            draw_logs(f, main_area, &filtered, state);
+            draw_logs(f, area, &filtered, state);
         } else {
-            // Horizontal split: left (panels) | right (sessions + logs)
-            // Left column: Server info + QR + Cert (narrower to give more room for logs)
-            let cols = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(40), Constraint::Min(30)])
-                .split(main_area);
-
-            let left_area = cols[0];
-            let right_area = cols[1];
-
-            // Left column: vertical stack of Server info (if Full), QR, Certificate
-            if state.panel_mode == PanelMode::Full {
-                let left_rows = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(6), Constraint::Min(7), Constraint::Min(5)])
-                    .split(left_area);
-                draw_info(f, left_rows[0], info, stats);
-                draw_qr(f, left_rows[1], cert);
-                draw_cert_info(f, left_rows[2], cert);
-            } else {
-                // QrOnly: QR takes full left column
-                draw_qr(f, left_area, cert);
+            match layout_tier(area.width, area.height) {
+                LayoutTier::ThreeColumn => {
+                    // Server/QR/Cert | Users + Sessions | Logs
+                    let cols = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([
+                            Constraint::Length(LEFT_COL_WIDTH),
+                            Constraint::Length(MIDDLE_COL_WIDTH),
+                            Constraint::Min(30),
+                        ])
+                        .split(area);
+                    draw_left_column(f, cols[0], state, info, stats, cert);
+                    draw_middle_column(f, cols[1], users, sessions);
+                    draw_logs(f, cols[2], &filtered, state);
+                }
+                LayoutTier::TwoColumn => {
+                    // Server/QR/Cert | Users + Sessions + Logs
+                    let cols = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Length(LEFT_COL_WIDTH), Constraint::Min(30)])
+                        .split(area);
+                    draw_left_column(f, cols[0], state, info, stats, cert);
+                    draw_right_column(f, cols[1], users, sessions, &filtered, state);
+                }
+                LayoutTier::Compact => {
+                    // logs + status bar only
+                    draw_logs(f, area, &filtered, state);
+                }
             }
-
-            // Right column: Sessions (compact, top) + Logs (remaining space)
-            let right_rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(8), Constraint::Min(5)])
-                .split(right_area);
-            draw_sessions(f, right_rows[0], sessions);
-            draw_logs(f, right_rows[1], &filtered, state);
         }
 
-        draw_status_bar(f, status_area, state, stats, info, has_clipboard, filtered_total, throughput);
+        draw_status_bar(f, area, state, stats, info, has_clipboard, filtered_total, throughput);
     })?;
     Ok(())
 }
@@ -323,6 +328,107 @@ fn draw_cert_info(f: &mut ratatui::Frame, area: Rect, cert: &CertView) {
         )
         .wrap(Wrap { trim: true });
     f.render_widget(info, area);
+}
+
+fn draw_left_column(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    state: &TuiState,
+    info: &ServerInfo,
+    stats: &ServerStats,
+    cert: &CertView,
+) {
+    if state.panel_mode == PanelMode::Full {
+        let left_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(6), Constraint::Min(7), Constraint::Min(5)])
+            .split(area);
+        draw_info(f, left_rows[0], info, stats);
+        draw_qr(f, left_rows[1], cert);
+        draw_cert_info(f, left_rows[2], cert);
+    } else {
+        // QrOnly: QR takes the whole left column.
+        draw_qr(f, area, cert);
+    }
+}
+
+/// Middle column (three-column mode): Users on top, Sessions below.
+fn draw_middle_column(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    users: &[UserRow],
+    sessions: &[SessionRow],
+) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(8), Constraint::Min(5)])
+        .split(area);
+    draw_users(f, rows[0], users);
+    draw_sessions(f, rows[1], sessions);
+}
+
+/// Users panel: every user ever seen, with live online state and totals.
+fn draw_users(f: &mut ratatui::Frame, area: Rect, users: &[UserRow]) {
+    let now = std::time::Instant::now();
+    let mut lines: Vec<Line> = Vec::new();
+    for row in users.iter().take(100) {
+        let dot = if row.online {
+            Span::styled("●", Style::default().fg(THEME.ok))
+        } else {
+            Span::styled("○", Style::default().fg(THEME.dim))
+        };
+        // Live online time: accumulated + the delta of the active session,
+        // recomputed each frame so it ticks without extra pushes.
+        let online = live_total_online(row.total_online, row.connected_at, now);
+        let fp8 = row.fingerprint.get(..8).unwrap_or(&row.fingerprint);
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<4}", row.alias),
+                Style::default().fg(THEME.header).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("{fp8}  "), Style::default().fg(THEME.dim)),
+            dot,
+            Span::styled(
+                format!(" {:>12} ", fmt_duration(online.as_secs())),
+                Style::default().fg(THEME.value),
+            ),
+            Span::styled(format!("{} msgs", row.msgs_sent), Style::default().fg(THEME.dim)),
+        ]));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "no users yet",
+            Style::default().fg(THEME.dim),
+        )));
+    }
+    let block = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .title(" Users ")
+                .border_style(Style::default().fg(THEME.border)),
+        )
+        .wrap(Wrap { trim: true });
+    f.render_widget(block, area);
+}
+
+/// Right column (two-column fallback): Users + Sessions + Logs.
+fn draw_right_column(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    users: &[UserRow],
+    sessions: &[SessionRow],
+    filtered: &[&LogRecord],
+    state: &TuiState,
+) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(8), Constraint::Length(8), Constraint::Min(5)])
+        .split(area);
+    draw_users(f, rows[0], users);
+    draw_sessions(f, rows[1], sessions);
+    draw_logs(f, rows[2], filtered, state);
 }
 
 fn draw_sessions(f: &mut ratatui::Frame, area: Rect, sessions: &[SessionRow]) {
@@ -565,5 +671,18 @@ mod tests {
         assert_eq!(spans[0].style, Style::default().bg(Color::Yellow).fg(Color::Black));
         assert_eq!(spans[1].content, " İ foo");
         assert_eq!(spans[1].style, Style::default());
+    }
+
+    #[test]
+    fn layout_tier_thresholds() {
+        // Compact below 90 cols or below 24 rows.
+        assert_eq!(layout_tier(89, 30), LayoutTier::Compact);
+        assert_eq!(layout_tier(120, 23), LayoutTier::Compact);
+        // Two columns in the 90..124 band.
+        assert_eq!(layout_tier(90, 24), LayoutTier::TwoColumn);
+        assert_eq!(layout_tier(124, 24), LayoutTier::TwoColumn);
+        // Three columns at >= 125.
+        assert_eq!(layout_tier(125, 24), LayoutTier::ThreeColumn);
+        assert_eq!(layout_tier(300, 40), LayoutTier::ThreeColumn);
     }
 }
