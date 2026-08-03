@@ -317,7 +317,13 @@ pub(crate) async fn process_packet(
             if session.user.is_none() {
                 if let Some(fp) = crate::relay::users::fingerprint_of_keyexchange(packet_data) {
                     let alias = relay.users.bind_session(&fp);
-                    session.user = Some(fp);
+                    session.user = Some(fp.clone());
+                    // Mirror the binding into the live-session registry so
+                    // disconnect cleanup can release the user (Bug: online
+                    // status stuck after client disconnect).
+                    if let Some(mut meta) = relay.sessions.get_mut(&session_key) {
+                        meta.user = Some(fp);
+                    }
                     relay.tui.set_users(relay.user_rows());
                     debug!(
                         "[KEYEX] Session {} bound to user {}",

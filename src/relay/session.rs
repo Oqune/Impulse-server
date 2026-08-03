@@ -664,4 +664,64 @@ mod tests {
         assert!(row.total_online >= Duration::ZERO);
         assert_eq!(row.connected_at, None);
     }
+
+    #[test]
+    fn cleanup_only_releases_when_session_meta_is_bound() {
+        // Regression: the 0x0C handler sets `Session.user`, but `SessionMeta`
+        // in the relay's registry must ALSO be updated (mirrored) for cleanup
+        // to release the user on disconnect. If the mirror is missing, the
+        // user's online status sticks forever after the client disconnects.
+        let users = UserRegistry::new();
+        let sessions: DashMap<u64, SessionMeta> = DashMap::new();
+        let stats = ServerStats::new();
+        let auth_nonces = DashMap::new();
+        let auth_attempts = DashMap::new();
+        let key_exchange_store = DashMap::new();
+
+        let fp = "deadbeefcafebabe0123456789abcdef".to_string();
+        users.bind_session(&fp);
+
+        // 1) Stale meta (user: None) → disconnect must NOT release the user,
+        //    mirroring the pre-fix bug so it stays a safety net.
+        sessions.insert(
+            10,
+            SessionMeta {
+                ip: "127.0.0.1".parse::<IpAddr>().unwrap(),
+                authenticated: true,
+                connected_at: Instant::now(),
+                user: None,
+            },
+        );
+        cleanup_session_state(
+            &sessions,
+            &stats,
+            &users,
+            &auth_nonces,
+            &auth_attempts,
+            &key_exchange_store,
+            10,
+        );
+        assert!(users.rows()[0].online, "unbound session must not release the user");
+
+        // 2) Bound meta (user: Some) → disconnect MUST release the user.
+        sessions.insert(
+            11,
+            SessionMeta {
+                ip: "127.0.0.1".parse::<IpAddr>().unwrap(),
+                authenticated: true,
+                connected_at: Instant::now(),
+                user: Some(fp.clone()),
+            },
+        );
+        cleanup_session_state(
+            &sessions,
+            &stats,
+            &users,
+            &auth_nonces,
+            &auth_attempts,
+            &key_exchange_store,
+            11,
+        );
+        assert!(!users.rows()[0].online, "bound session must release the user");
+    }
 }
