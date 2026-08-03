@@ -37,6 +37,20 @@ protocol changes; no client changes required.
   uptime only).
 - No new dependencies.
 
+## Future Work (deferred, not in this spec)
+
+- **Client participant list ("список участников")**: clients want to know the
+  set of users on the server and their online state. Natural next phase after
+  this spec — the server already tracks users, so it can emit online/offline
+  presence notifications. Solves the real key-discovery problem: today a sender
+  can only encrypt to recipients whose key was cached while both were online
+  (0x0C relay); offline delivery itself already works via 72 h `MessageStore`
+  + `0x03 Sync`.
+- **1:1 private messages**: client-side only — encrypt to a chosen recipient
+  (plus self) instead of all cached keys. Server relay logic unchanged.
+- **Proof-of-possession** (sign a nonce with the DSA key) to harden identity
+  against replay of another device's public key.
+
 ---
 
 ## 1. User Identity & Registry
