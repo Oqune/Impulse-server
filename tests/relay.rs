@@ -525,3 +525,23 @@ fn skip_byte_resilience() {
     );
     assert_eq!(try_read_packet(&data), TryReadResult::Packet(data.len()));
 }
+
+#[test]
+fn fingerprint_of_keyexchange_matches_client_id() {
+    // ML-KEM-768 / ML-DSA-65 public-key sizes, as sent by the Android client
+    // in the 0x0C KeyExchangeKemDsa packet right after auth.
+    let kem = vec![0x5Au8; 1184];
+    let dsa = vec![0x6Bu8; 1952];
+    let packet = build_key_exchange(&kem, &dsa);
+
+    let fp = impulse_server::relay::users::fingerprint_of_keyexchange(&packet)
+        .expect("valid 0x0C frame yields a fingerprint");
+    assert_eq!(fp.len(), 32);
+    // Golden value: SHA-256(0x5A repeated 1184 times) hex, truncated to 32 —
+    // exactly the client's SecureKeyManager.fingerprintForBytes output.
+    assert_eq!(fp, "383e3a1e042cf51407cb723ec48b958e");
+
+    // The frame the server relays to peers is byte-identical to the client's.
+    assert_eq!(packet[0], 0x0C);
+    assert_eq!(try_read_packet(&packet), TryReadResult::Packet(packet.len()));
+}
