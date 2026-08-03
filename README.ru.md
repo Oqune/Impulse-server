@@ -58,7 +58,7 @@ Impulse — это relay-сервер для end-to-end-encrypted мессенд
     максимальный размер полезной нагрузки, SHA-256 отпечаток сертификата (сокращённый),
     обратный отсчёт до истечения сертификата, индикатор ⚠ во время перекрытия ключей
     и сканируемый QR-код.
-  - **Правая колонка** (Help bar + Logs): поток логов сервера в реальном времени
+  - **Правая колонка** (Sessions сверху, Logs снизу): поток логов сервера в реальном времени
     с фильтрами `1`–`5` (ERR/WRN/INF/DBG/TRC), прокруткой
     (`↑↓`/`PgUp`/`PgDn`/`Home`/`End` или колесо мыши), поиском (`/`), `Space`
     для паузы и `Shift+C` для копирования логов в буфер обмена. `Tab` переключает
@@ -258,6 +258,7 @@ GitHub Release; `.deb` и `.rpm` пакеты собираются для Linux 
 | `0x05` | C→S / S→C | Data | C→S: `len`-prefixed payload. S→C: `u64 id`, `u64 ts`, `len`-prefixed payload |
 | `0x06` | обе | Heartbeat | `u64` client_timestamp (эхо-ответ) |
 | `0x07` | S→C | NewCertHash | ровно 32 сырых байта SHA-256 + `u64` unix expiry |
+| `0x08` | обе | Disconnect | без payload (корректное закрытие с любой стороны) |
 | `0x0B` | S→C | AuthChallenge | 16 байт nonce + `u32 LE salt_len`, `salt_len` байт B64 Argon2id соли |
 | `0x0C` | C→S / S→C | KeyExchangeKemDsa | `len`-prefixed комбинированный ML-KEM + ML-DSA-65 публичные ключи (ретранслируется атомарно) |
 

@@ -305,18 +305,18 @@ pub(crate) async fn process_packet(
                 .entry(session_key)
                 .or_default()
                 .push(packet);
-debug!("[KEYEX] Session {} relayed combined KEM+DSA to all peers", session_key);
-             Ok(())
-         }
-         Opcode::Disconnect => {
-             info!("[DISCONNECT] Session {} disconnecting", session_key);
-             return Err(anyhow::anyhow!("client disconnected"));
-         }
-         // Server→client opcodes never reach this function (see the module doc);
-         // kept only for match exhaustiveness.
-         Opcode::AuthResult
-         | Opcode::SyncResponse
-         | Opcode::NewCertHash
-         | Opcode::AuthChallenge => Ok(()),
+            debug!("[KEYEX] Session {} relayed combined KEM+DSA to all peers", session_key);
+            Ok(())
+        }
+        Opcode::Disconnect => {
+            info!("[DISCONNECT] Session {} disconnecting", session_key);
+            return Err(anyhow::anyhow!("client disconnected"));
+        }
+        // Server→client opcodes never reach this function (see the module doc);
+        // kept only for match exhaustiveness.
+        Opcode::AuthResult
+        | Opcode::SyncResponse
+        | Opcode::NewCertHash
+        | Opcode::AuthChallenge => Ok(()),
     }
 }

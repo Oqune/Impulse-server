@@ -479,10 +479,12 @@ fn try_read_packet_all_opcodes() {
     let ke = build_key_exchange(&[0x11; 32], &[0x22; 64]);
     assert_eq!(try_read_packet(&ke), TryReadResult::Packet(ke.len()));
 
+    // Disconnect (0x08): opcode only
+    assert_eq!(try_read_packet(&[0x08]), TryReadResult::Packet(1));
+
     // Unknown opcodes
     assert_eq!(try_read_packet(&[0xFF]), TryReadResult::UnknownOpcode);
     assert_eq!(try_read_packet(&[0x00]), TryReadResult::UnknownOpcode);
-    assert_eq!(try_read_packet(&[0x08]), TryReadResult::UnknownOpcode);
 
     // Empty buffer
     assert_eq!(try_read_packet(&[]), TryReadResult::Incomplete);

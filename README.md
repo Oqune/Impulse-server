@@ -55,8 +55,8 @@ Key design points:
     `sessions / MAX_SESSIONS`, stored message count, message TTL, max payload
     size, certificate SHA-256 fingerprint (short), cert expiry countdown, a
     ⚠ rotating indicator during key overlap, and a scannable QR code.
-  - **Right column** (Help bar + Logs): live server log stream with level
-    filters `1`–`5` (ERR/WRN/INF/DBG/TRC), scroll (`↑↓`/`PgUp`/`PgDn`/`Home`/`End`
+  - **Right column** (Sessions on top, Logs below): live server log stream with
+    level filters `1`–`5` (ERR/WRN/INF/DBG/TRC), scroll (`↑↓`/`PgUp`/`PgDn`/`Home`/`End`
     or mouse wheel), search (`/`), `Space` to pause, and `Shift+C` to copy all
     logs to clipboard. `Tab` cycles Server/Sessions panels; `f` focuses the QR
     code. The status bar shows live throughput, uptime, active filters and hints.
@@ -264,6 +264,7 @@ followed by `len` bytes.
 | `0x05` | C→S / S→C | Data | C→S: `len`-prefixed payload. S→C: `u64 id`, `u64 ts`, `len`-prefixed payload |
 | `0x06` | both | Heartbeat | `u64` client_timestamp (echoed back) |
 | `0x07` | S→C | NewCertHash | exactly 32 raw SHA-256 bytes + `u64` unix expiry |
+| `0x08` | both | Disconnect | no payload (graceful close from either side) |
 | `0x0B` | S→C | AuthChallenge | 16-byte nonce + `u32 LE salt_len` + B64 Argon2id salt |
 | `0x0C` | C→S / S→C | KeyExchangeKemDsa | `len`-prefixed combined ML-KEM + ML-DSA-65 public keys (relayed atomically) |
 

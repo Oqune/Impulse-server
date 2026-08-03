@@ -32,6 +32,7 @@ pub fn try_read_packet(buf: &[u8]) -> TryReadResult {
         0x03 => 1 + 8,       // Sync: opcode + u64
         0x05 => 1 + 4,       // Data: opcode + len prefix
         0x06 => 1 + 8,       // Heartbeat: opcode + u64
+        0x08 => 1,           // Disconnect: opcode only, no payload
         0x0C => 1 + 4,       // KeyExchangeKemDsa: opcode + len prefix
         _ => return TryReadResult::UnknownOpcode,
     };
@@ -59,6 +60,9 @@ pub fn try_read_packet(buf: &[u8]) -> TryReadResult {
         }
         0x03 | 0x06 => {
             return TryReadResult::Packet(9);
+        }
+        0x08 => {
+            return TryReadResult::Packet(1);
         }
         _ => return TryReadResult::UnknownOpcode,
     };
@@ -89,6 +93,10 @@ mod tests {
         assert_eq!(try_read_packet(&[0x05, 0x00]), TryReadResult::Incomplete);
         // Sync: opcode + u64
         assert_eq!(try_read_packet(&[0x03, 1, 2, 3, 4, 5, 6, 7, 8]), TryReadResult::Packet(9));
+        // Disconnect: opcode only
+        assert_eq!(try_read_packet(&[0x08]), TryReadResult::Packet(1));
+        // Disconnect with trailing junk is still recognized (single-byte frame)
+        assert_eq!(try_read_packet(&[0x08, 0x99]), TryReadResult::Packet(1));
     }
 
     #[test]
