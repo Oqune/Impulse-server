@@ -41,3 +41,12 @@ Thumbs.db
 *.rpm
 target/deb/
 target/generate-rpm/
+  
+# AI agent artifacts -- never commit to VCS  
+.superpowers/  
+.kilo/  
+.idea/shelf/  
+*.log  
+server_out.log  
+server_err.log  
+docs/superpowers/  
