@@ -190,25 +190,37 @@ New-NetFirewallRule -DisplayName "Impulse QUIC" -Direction Inbound -Protocol UDP
 
 ## Platforms & downloads
 
-Impulse-server is portable Rust (edition 2024). CI builds release binaries and
-`.deb`/`.rpm` packages for the targets below on every tagged release.
+Impulse-server is portable Rust (edition 2024). On every tagged release the CI
+builds release binaries for the targets below.
 
-| Platform | Target triple | Status | Notes |
-|----------|---------------|--------|-------|
-| Linux (x86-64) | `x86_64-unknown-linux-gnu` | ✅ CI tested | Recommended for servers |
-| Linux (ARM64) | `aarch64-unknown-linux-gnu` | ✅ CI tested (cross) | AWS Graviton, Raspberry Pi 4 (64-bit OS) |
-| Linux (ARMv7) | `armv7-unknown-linux-gnueabihf` | ✅ CI tested (cross) | Raspberry Pi 2/3, 32-bit OS |
-| Linux (RISC-V 64) | `riscv64gc-unknown-linux-gnu` | ✅ CI tested (cross) | VisionFive 2 |
-| Windows (x86-64) | `x86_64-pc-windows-msvc` | ✅ CI tested | Console app, binds UDP/QUIC directly |
-| Windows (ARM64) | `aarch64-pc-windows-msvc` | ✅ CI tested | Windows on ARM |
-| FreeBSD / BSDs | `x86_64-unknown-freebsd` | ⚠️ Manual only | `aws-lc-sys` has no FreeBSD cross sysroot; native toolchain required |
+| Platform | Target triple | Build | Runtime-tested | Notes |
+|----------|---------------|-------|----------------|-------|
+| Linux (x86-64) | `x86_64-unknown-linux-gnu` | ✅ CI build | ✅ CI `cargo test` | Recommended for servers |
+| Linux (ARM64) | `aarch64-unknown-linux-gnu` | ✅ CI build (cross) | ⚠️ build only | AWS Graviton, Pi 4 (64-bit); expected stable, not runtime-tested in CI |
+| Linux (ARMv7) | `armv7-unknown-linux-gnueabihf` | ✅ CI build (cross) | ⚠️ build only | Pi 2/3, 32-bit OS; expected stable |
+| Linux (RISC-V 64) | `riscv64gc-unknown-linux-gnu` | ✅ CI build (cross) | ⚠️ build only | VisionFive 2; expected stable |
+| Windows (x86-64) | `x86_64-pc-windows-msvc` | ✅ CI build | ⚠️ build only | Console app, binds UDP/QUIC directly |
+| Windows (ARM64) | `aarch64-pc-windows-msvc` | ✅ CI build | ⚠️ build only | Windows on ARM |
+| FreeBSD / BSDs | `x86_64-unknown-freebsd` | ❌ not in CI | ⚠️ manual only | `aws-lc-sys` has no FreeBSD cross sysroot; native toolchain required |
 
-Prebuilt binaries for every ✅/⚠️ row (except FreeBSD) are attached to each
-GitHub Release; `.deb`/`.rpm` packages are built for Linux x86-64 and ARM64.
-Artifacts follow `ImpulseServer-<version>-<os>-<arch>.<ext>`, e.g.
+**Legend:** "CI build" = compiled by the release pipeline; "runtime-tested" =
+`cargo test` actually executed on that target. Only `x86_64-unknown-linux-gnu`
+runs the test suite in CI; cross/Windows targets are compiled but their test
+binaries are not executed in the pipeline — they are expected to work (same
+Rust/QUIC code path) but are **not** verified by CI beyond a successful build.
+
+Prebuilt binaries for every CI target are attached to each GitHub Release;
+`.deb`/`.rpm` packages are built for **Linux x86-64 and ARM64 only**. Artifacts
+follow `ImpulseServer-<version>-<os>-<arch>.<ext>`, e.g.
 `ImpulseServer-2.7.2-linux-amd64.tar.gz` or
 `ImpulseServer-2.7.2-windows-arm64.zip`. The archives contain the binary and
 `LICENSE` only — config is created on first run or via `--init`.
+
+**Android client** (separate repo, `Oqune/Impulse-client`): release APKs are
+built locally and uploaded to GitHub Releases per ABI (arm64-v8a, armeabi-v7a,
+x86_64, x86 + universal). JVM unit tests pass; on-device/instrumented tests
+and broad device field-testing are **not** automated — see the client README
+for the current device-support status.
 
 ## Protocol (binary, little-endian)
 
@@ -219,7 +231,7 @@ followed by `len` bytes.
 |--------|-----|------|--------|
 | `0x01` | C→S | Auth | `u32 LE pwd_len` + raw password bytes + 32 raw HMAC-SHA-256 bytes |
 | `0x0B` | S→C | AuthChallenge | 16-byte nonce + `u32 LE salt_len` + B64 Argon2id salt |
-| `0x02` | S→C | AuthResult | `u8` status (`0`=ok, `1`=fail) + optional `len`-prefixed message |
+| `0x02` | S→C | AuthResult | `u8` status (`0x01`=success, `0x00`=failure) + optional `len`-prefixed error message |
 | `0x03` | C→S | Sync | `u64` last_seen_id |
 | `0x04` | S→C | SyncResponse | `u32` count, then per message: `u64 id`, `u64 ts`, `len`-prefixed payload |
 | `0x05` | C→S / S→C | Data | C→S: `len`-prefixed payload. S→C: `u64 id`, `u64 ts`, `len`-prefixed payload |
@@ -227,6 +239,10 @@ followed by `len` bytes.
 | `0x07` | S→C | NewCertHash | exactly 32 raw SHA-256 bytes + `u64` unix expiry |
 | `0x08` | both | Disconnect | no payload (graceful close from either side) |
 | `0x0C` | C→S / S→C | KeyExchangeKemDsa | combined ML-KEM + ML-DSA-65 public keys (relayed atomically) |
+
+Opcodes `0x09`–`0x0A` are reserved/unused. The authoritative list is the
+`Opcode` enum in `src/protocol.rs`; it MUST stay in sync with the client's
+`transport/Protocol.kt`. Unknown/invalid client opcodes close the connection.
 
 Unknown/invalid client opcodes close the connection. Idle streams close after
 300 s. Sessions are capped at 1024 (unique `AtomicU64` ids); the aggregate buffer

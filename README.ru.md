@@ -193,25 +193,37 @@ New-NetFirewallRule -DisplayName "Impulse QUIC" -Direction Inbound -Protocol UDP
 
 ## Платформы и загрузка
 
-Impulse-server написан на переносимом Rust (edition 2024). CI собирает релизные
-бинарники и `.deb`/`.rpm` пакеты для целей ниже на каждом теге релиза.
+Impulse-server написан на переносимом Rust (edition 2024). На каждом теге релиза
+CI собирает релизные бинарники для целей ниже.
 
-| Платформа | Target triple | Статус | Примечания |
-|-----------|---------------|--------|------------|
-| Linux (x86-64) | `x86_64-unknown-linux-gnu` | ✅ CI tested | Рекомендуется для серверов |
-| Linux (ARM64) | `aarch64-unknown-linux-gnu` | ✅ CI tested (cross) | AWS Graviton, Raspberry Pi 4 (64-bit OS) |
-| Linux (ARMv7) | `armv7-unknown-linux-gnueabihf` | ✅ CI tested (cross) | Raspberry Pi 2/3, 32-bit OS |
-| Linux (RISC-V 64) | `riscv64gc-unknown-linux-gnu` | ✅ CI tested (cross) | VisionFive 2 |
-| Windows (x86-64) | `x86_64-pc-windows-msvc` | ✅ CI tested | Консольное приложение, бинд на UDP/QUIC |
-| Windows (ARM64) | `aarch64-pc-windows-msvc` | ✅ CI tested | Устройства на Windows on ARM |
-| FreeBSD / BSD | `x86_64-unknown-freebsd` | ⚠️ Manual only | У `aws-lc-sys` нет FreeBSD sysroot для кросса; нужен нативный тулчейн |
+| Платформа | Target triple | Сборка | Runtime-тест | Примечания |
+|-----------|---------------|--------|--------------|------------|
+| Linux (x86-64) | `x86_64-unknown-linux-gnu` | ✅ CI сборка | ✅ CI `cargo test` | Рекомендуется для серверов |
+| Linux (ARM64) | `aarch64-unknown-linux-gnu` | ✅ CI сборка (cross) | ⚠️ только сборка | AWS Graviton, Pi 4 (64-bit); ожидается стабильным, не тестирован в CI |
+| Linux (ARMv7) | `armv7-unknown-linux-gnueabihf` | ✅ CI сборка (cross) | ⚠️ только сборка | Pi 2/3, 32-bit OS; ожидается стабильным |
+| Linux (RISC-V 64) | `riscv64gc-unknown-linux-gnu` | ✅ CI сборка (cross) | ⚠️ только сборка | VisionFive 2; ожидается стабильным |
+| Windows (x86-64) | `x86_64-pc-windows-msvc` | ✅ CI сборка | ⚠️ только сборка | Консольное приложение, бинд на UDP/QUIC |
+| Windows (ARM64) | `aarch64-pc-windows-msvc` | ✅ CI сборка | ⚠️ только сборка | Устройства на Windows on ARM |
+| FreeBSD / BSD | `x86_64-unknown-freebsd` | ❌ нет в CI | ⚠️ вручную | У `aws-lc-sys` нет FreeBSD sysroot для кросса; нужен нативный тулчейн |
 
-Готовые бинарники для всех ✅/⚠️ строк (кроме FreeBSD) прикреплены к каждому
-GitHub Release; `.deb`/`.rpm` пакеты собираются для Linux x86-64 и ARM64.
-Артефакты следуют схеме `ImpulseServer-<версия>-<os>-<arch>.<ext>`, например
+**Легенда:** «CI сборка» = скомпилировано пайплайном; «runtime-тест» = `cargo test`
+реально выполнен на этой цели. Только `x86_64-unknown-linux-gnu` гоняет тесты в
+CI; кросс- и Windows-цели компилируются, но их тесты в пайплайне не запускаются —
+ожидается работоспособность (тот же Rust/QUIC код), но **не** верифицированы CI
+дальше успешной сборки.
+
+Готовые бинарники для всех CI-целей прикреплены к каждому GitHub Release;
+`.deb`/`.rpm` пакеты собираются **только для Linux x86-64 и ARM64**. Артефакты
+следуют схеме `ImpulseServer-<версия>-<os>-<arch>.<ext>`, например
 `ImpulseServer-2.7.2-linux-amd64.tar.gz` или
 `ImpulseServer-2.7.2-windows-arm64.zip`. Архивы содержат только бинарник и
 `LICENSE` — конфиг создаётся при первом запуске или через `--init`.
+
+**Android-клиент** (отдельный репозиторий, `Oqune/Impulse-client`): релизные APK
+собираются локально и заливаются в GitHub Releases по ABI (arm64-v8a, armeabi-v7a,
+x86_64, x86 + universal). JVM unit-тесты проходят; on-device/instrumented тесты и
+широкое полевое тестирование на устройствах **не** автоматизированы — см. README
+клиента для текущего статуса поддержки устройств.
 
 ## Протокол (бинарный, little-endian)
 
@@ -221,7 +233,7 @@ GitHub Release; `.deb`/`.rpm` пакеты собираются для Linux x86
 |--------|-------|-----|------|
 | `0x01` | C→S | Auth | `u32 LE pwd_len`, `pwd_len` байт пароля (UTF-8), 32 сырых байта HMAC-SHA-256 |
 | `0x0B` | S→C | AuthChallenge | 16 байт nonce + `u32 LE salt_len`, `salt_len` байт B64 Argon2id соли |
-| `0x02` | S→C | AuthResult | `u8` статус (`0`=ok, `1`=fail) + опциональный `len`-prefixed текст |
+| `0x02` | S→C | AuthResult | `u8` статус (`0x01`=успех, `0x00`=ошибка) + опциональный `len`-prefixed текст ошибки |
 | `0x03` | C→S | Sync | `u64` last_seen_id |
 | `0x04` | S→C | SyncResponse | `u32` count, затем для каждого сообщения: `u64 id`, `u64 ts`, `len`-prefixed payload |
 | `0x05` | C→S / S→C | Data | C→S: `len`-prefixed payload. S→C: `u64 id`, `u64 ts`, `len`-prefixed payload |
