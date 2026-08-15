@@ -442,6 +442,15 @@ impl RelayServer {
                                         );
                                         return; // fatal: stream is corrupted
                                     }
+                                    TryReadResult::Malformed => {
+                                        warn!(
+                                            "[READER] Session {} MALFORMED FRAME (first byte=0x{:02x}, buf={} bytes) — closing session",
+                                            session_key,
+                                            if buf.is_empty() { 0 } else { buf[0] },
+                                            buf.len()
+                                        );
+                                        return; // fatal: malformed fixed-layout frame
+                                    }
                                 }
                             }
                         }

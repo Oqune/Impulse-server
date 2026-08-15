@@ -19,6 +19,9 @@ pub enum TryReadResult {
     /// The declared payload length exceeds [`MAX_PACKET_LEN`] — the session
     /// must be closed because the stream is corrupted beyond recovery.
     OversizedPayload,
+    /// The frame's fixed-layout fields are malformed (e.g. an Auth frame whose
+    /// HMAC length prefix is not 32). The session must be closed.
+    Malformed,
 }
 
 /// Try to read a complete packet length from the buffer.
@@ -45,8 +48,13 @@ pub fn try_read_packet(buf: &[u8]) -> TryReadResult {
             if buf.len() < 5 {
                 return TryReadResult::Incomplete;
             }
-            let pwd_len = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
-            let total = 1 + 4 + pwd_len + 32;
+            // C3 (HMAC-only): [0x01][u32 hmac_len=32][32 hmac]. No password on
+            // the wire — only a fixed 32-byte HMAC response.
+            let hmac_len = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+            if hmac_len != 32 {
+                return TryReadResult::Malformed;
+            }
+            let total = 1 + 4 + hmac_len;
             if total > MAX_PACKET_LEN {
                 return TryReadResult::OversizedPayload;
             }
@@ -108,10 +116,9 @@ mod tests {
 
     #[test]
     fn auth_uses_minimum_length_with_hmac() {
-        // 0x01 + len-prefixed pwd + 32 raw HMAC
+        // C3 (HMAC-only): 0x01 + len-prefixed 32-byte HMAC. No password on wire.
         let mut w = PacketWriter::with_opcode(Opcode::Auth);
-        w.write_len_prefixed(b"pw");
-        w.write_raw(&[0u8; 32]);
+        w.write_len_prefixed(&[0u8; 32]);
         let bytes = w.into_bytes();
         assert_eq!(try_read_packet(&bytes), TryReadResult::Packet(bytes.len()));
     }

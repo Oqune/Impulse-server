@@ -447,10 +447,9 @@ fn per_recipient_blob_parsing() {
 
 #[test]
 fn try_read_packet_all_opcodes() {
-    // Auth (0x01): opcode + u32 pwd_len + pwd + 32 HMAC
+    // Auth (0x01): C3 HMAC-only — opcode + u32 hmac_len(=32) + 32 HMAC
     let mut auth = PacketWriter::with_opcode(Opcode::Auth);
-    auth.write_len_prefixed(b"password123");
-    auth.write_raw(&[0x42; 32]);
+    auth.write_len_prefixed(&[0x42; 32]);
     let auth_bytes = auth.into_bytes();
     assert_eq!(
         try_read_packet(&auth_bytes),

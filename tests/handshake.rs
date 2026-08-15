@@ -136,20 +136,21 @@ fn auth_packet_wire_layout() {
     // Byte 0: opcode 0x01
     assert_eq!(packet[0], 0x01);
 
-    // Bytes 1-4: password length (u32 LE)
-    let pw_len = u32::from_le_bytes([packet[1], packet[2], packet[3], packet[4]]);
-    assert_eq!(pw_len as usize, password.len());
+    // C3 (HMAC-only): bytes 1-4 = hmac length (u32 LE), must be 32.
+    let hmac_len = u32::from_le_bytes([packet[1], packet[2], packet[3], packet[4]]);
+    assert_eq!(hmac_len, 32, "C3: 0x01 must carry a 32-byte HMAC, not a password");
 
-    // Bytes 5..(5+pw_len): raw password bytes
-    let pw_start = 5;
-    let pw_end = pw_start + pw_len as usize;
-    assert_eq!(&packet[pw_start..pw_end], password.as_bytes());
+    // The raw password must NOT appear anywhere on the wire.
+    assert!(
+        !packet[5..].windows(password.len()).any(|w| w == password.as_bytes()),
+        "C3: raw password must not travel on the wire"
+    );
 
-    // Bytes pw_end..(pw_end+32): raw HMAC (no length prefix)
-    assert_eq!(packet.len(), pw_end + 32);
+    // Total frame = 1 (opcode) + 4 (len) + 32 (hmac) = 37 bytes.
+    assert_eq!(packet.len(), 5 + 32);
 
-    // Verify the HMAC is present and 32 bytes
-    let hmac = &packet[pw_end..];
+    // Verify the HMAC is present and 32 bytes.
+    let hmac = &packet[5..];
     assert_eq!(hmac.len(), 32);
 }
 
