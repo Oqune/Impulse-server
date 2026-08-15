@@ -1,9 +1,13 @@
 //! Authentication handshake for WebTransport sessions.
 //!
-//! Protocol (byte-compatible with v2.5.x):
-//!   Client sends: [0x01] [len:raw_password_bytes] [32 raw bytes: HMAC-SHA-256]
-//!   HMAC key   = Argon2id(password) output (32 bytes)
+//! Protocol (SPEC C3, §4.2 — HMAC-only challenge response):
+//!   Client sends: [0x01] [u32 hmac_len=32] [32 raw bytes: HMAC-SHA-256]
+//!   HMAC key   = Argon2id(stored_hash) output (32 bytes) — derived by the
+//!                server directly from the stored hash, so the password never
+//!                travels on the wire (C3).
 //!   HMAC msg   = server nonce (16 bytes)
+//! The nonce is single-use (C4): a successful verification consumes it, so a
+//! replayed 0x01 frame is rejected.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -22,8 +26,14 @@ use crate::relay::session::Session;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Derive the 32-byte HMAC key for challenge-response, re-running Argon2 with
+/// Derive the 32-byte HMAC key for challenge-response by re-running Argon2 with
 /// the exact parameters and salt stored in the config hash.
+///
+/// Retained for parity with the client-side derivation (`crypto::derive_argon2_key`);
+/// the server verifies the client's HMAC via [`crate::crypto::hmac_key_from_stored_hash`],
+/// which needs no password (C3). Kept (not deleted) so the derivation logic stays in one
+/// obvious place; marked allow(dead_code) because the server path no longer needs it.
+#[allow(dead_code)]
 fn derive_argon2_key(password: &str, stored_hash: &str) -> anyhow::Result<Vec<u8>> {
     let parsed = PasswordHash::new(stored_hash)
         .map_err(|e| anyhow::anyhow!("failed to parse stored hash: {}", e))?;
@@ -45,24 +55,32 @@ fn derive_argon2_key(password: &str, stored_hash: &str) -> anyhow::Result<Vec<u8
     }
 }
 
-/// Verify the client's challenge-response against a stored Argon2 hash.
-/// Returns `true` when the password matches AND the HMAC challenge is valid.
+/// Verify the client's challenge-response against the stored Argon2 hash.
+///
+/// The client sends only `HMAC(Argon2id(stored_hash), nonce)` (C3) — no password on the
+/// wire. The server derives the HMAC key directly from the stored hash's embedded Argon2id
+/// output (via [`crate::crypto::hmac_key_from_stored_hash`]) and compares it to the response.
+/// On success the nonce is consumed so a replayed frame fails (C4). Fail-closed: any
+/// missing/incorrect/again-used nonce, or a HMAC mismatch, rejects.
 pub(crate) async fn verify_auth(
     relay: &Arc<RelayServer>,
     session: &Session,
-    password: &str,
     client_response: &[u8],
 ) -> bool {
-    let hash_ok = crate::crypto::argon2_verify(password, &relay.password_hash);
-    if !hash_ok {
-        relay.stats.auth_fail.fetch_add(1, Ordering::Relaxed);
-        warn!("[AUTH] Session {} password verification failed", session.key);
-        return false;
-    }
+    // Derive the HMAC key directly from the stored hash — no password needed (C3).
+    let key = match crate::crypto::hmac_key_from_stored_hash(&relay.password_hash) {
+        Ok(k) => k,
+        Err(e) => {
+            relay.stats.auth_fail.fetch_add(1, Ordering::Relaxed);
+            warn!("[AUTH] Session {} cannot derive HMAC key: {}", session.key, e);
+            return false;
+        }
+    };
+
     let nonce_valid = match relay.auth_nonces.get(&session.key) {
         Some(entry) => {
-            let (nonce, created_at) = entry.value();
-            let age = Instant::now().duration_since(*created_at);
+            let (nonce, created_at) = (entry.value().0.clone(), entry.value().1);
+            let age = Instant::now().duration_since(created_at);
             if age > relay.nonce_max_age {
                 warn!("[AUTH] Session {} challenge nonce expired", session.key);
                 false
@@ -70,24 +88,16 @@ pub(crate) async fn verify_auth(
                 warn!("[AUTH] Session {} missing/incorrect challenge response", session.key);
                 false
             } else {
-                match derive_argon2_key(password, &relay.password_hash) {
-                    Ok(key) => {
-                        let mut mac = match HmacSha256::new_from_slice(&key) {
-                            Ok(m) => m,
-                            Err(_) => return false,
-                        };
-                        mac.update(nonce);
-                        let ok = mac.verify_slice(client_response).is_ok();
-                        if !ok {
-                            warn!("[AUTH] Session {} HMAC challenge response mismatch", session.key);
-                        }
-                        ok
-                    }
-                    Err(e) => {
-                        warn!("[AUTH] Session {} key derivation failed: {}", session.key, e);
-                        false
-                    }
+                let mut mac = match HmacSha256::new_from_slice(&key) {
+                    Ok(m) => m,
+                    Err(_) => return false,
+                };
+                mac.update(&nonce);
+                let ok = mac.verify_slice(client_response).is_ok();
+                if !ok {
+                    warn!("[AUTH] Session {} HMAC challenge response mismatch", session.key);
                 }
+                ok
             }
         }
         None => {
@@ -95,7 +105,10 @@ pub(crate) async fn verify_auth(
             false
         }
     };
+
     if nonce_valid {
+        // C4 (§4): consume the nonce so a replayed 0x01 frame fails on second use.
+        relay.auth_nonces.remove(&session.key);
         relay.stats.auth_ok.fetch_add(1, Ordering::Relaxed);
     } else {
         relay.stats.auth_fail.fetch_add(1, Ordering::Relaxed);
@@ -121,14 +134,27 @@ pub(crate) async fn process_packet(
 
     match opcode {
         Opcode::Auth => {
-            // Auth: [0x01] [len-prefixed: raw password bytes] [32 raw bytes: HMAC-SHA-256]
-            // HMAC key = Argon2id(password) output bytes (32 bytes)
-            // HMAC message = server nonce (16 bytes)
-            let password_bytes = reader
+            // C3 (§4.2): HMAC-only challenge response. Wire:
+            //   [0x01] [u32 hmac_len=32] [32 hmac_response]
+            // The password never travels on the wire; the server verifies the HMAC
+            // against the key derived directly from the stored Argon2id hash (no password
+            // needed). C4 (§4): skip re-auth for an already-authenticated session.
+            if session.authenticated {
+                // Drain the frame and ignore — do not re-verify or re-broadcast.
+                let _ = reader.remaining();
+                return Ok(());
+            }
+
+            let hmac_field = reader
                 .read_len_prefixed()
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
-            let password = String::from_utf8(password_bytes)
-                .map_err(|_| anyhow::anyhow!("invalid UTF-8 in password"))?;
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if hmac_field.len() != 32 {
+                warn!(
+                    "[AUTH] Session {} malformed Auth frame (HMAC field is {} bytes, expected 32)",
+                    session_key, hmac_field.len()
+                );
+                return Err(anyhow::anyhow!("malformed Auth frame"));
+            }
 
             // Check brute-force limit.
             let attempts = relay.auth_attempts.entry(session_key).or_insert_with(|| AtomicU32::new(0));
@@ -139,8 +165,8 @@ pub(crate) async fn process_packet(
             }
             attempts.fetch_add(1, Ordering::Relaxed);
 
-            // Verify password + challenge-response (byte-compatible with v2.5.x).
-            let ok = verify_auth(relay, session, &password, reader.remaining()).await;
+            // Verify the HMAC challenge-response (key derived from stored hash, C3).
+            let ok = verify_auth(relay, session, &hmac_field).await;
 
             let response = ServerPacketEncoder::auth_result(
                 ok,
