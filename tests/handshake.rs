@@ -187,23 +187,21 @@ fn auth_packet_full_wire_format() {
 
     let packet = build_client_auth(password, &nonce, &stored_hash);
 
-    // Verify wire layout: opcode + u32 pwd_len + pwd + 32 HMAC
+    // NEW wire layout (C3 §4.2): opcode + u32 hmac_len(=32) + 32-byte HMAC response.
+    // The raw password NEVER travels on the wire.
     assert_eq!(packet[0], 0x01);
-    let pwd_len = u32::from_le_bytes(packet[1..5].try_into().unwrap());
-    assert_eq!(pwd_len as usize, password.len());
-    assert_eq!(&packet[5..5 + pwd_len as usize], password.as_bytes());
-    assert_eq!(packet.len(), 5 + pwd_len as usize + 32);
+    let hmac_len = u32::from_le_bytes(packet[1..5].try_into().unwrap());
+    assert_eq!(hmac_len, 32);
+    assert_eq!(packet.len(), 1 + 4 + 32);
 
     // Parse with PacketReader (exactly like process_packet)
     let mut reader = PacketReader::new(&packet);
     assert_eq!(reader.read_opcode().unwrap(), Opcode::Auth);
-    let parsed_pwd = reader.read_len_prefixed().unwrap();
-    assert_eq!(parsed_pwd, password.as_bytes());
-    let parsed_hmac = reader.read_bytes(32).unwrap();
+    let parsed_hmac = reader.read_len_prefixed().unwrap();
     assert_eq!(parsed_hmac.len(), 32);
     assert!(reader.remaining().is_empty());
 
-    // Server-side verification
+    // Server-side verification (HMAC-only; key derived from stored hash, C3)
     let (hash_ok, nonce_valid) = server_verify_auth(&packet, &stored_hash, &nonce).unwrap();
     assert!(hash_ok, "Argon2 password verification should succeed");
     assert!(nonce_valid, "HMAC challenge-response should succeed");

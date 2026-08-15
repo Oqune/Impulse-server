@@ -280,11 +280,22 @@ pub fn encode_new_cert_hash(hash: &[u8; 32], expires_at: u64) -> Vec<u8> {
     w.into_bytes()
 }
 
-/// Build an `AuthChallenge` packet (server→client: 16-byte nonce + B64 salt).
+/// Canonical Argon2id parameters (OWASP) the server enforces, transmitted in the
+/// `AuthChallenge` so the client derives its HMAC key from a single source of truth
+/// (SPEC N1). Format: `m=<m>,t=<t>,p=<p>` — a length-prefixed UTF-8 tag.
+pub const AUTH_CHALLENGE_PARAMS_TAG: &[u8] = b"m=47104,t=3,p=1";
+
+/// Build an `AuthChallenge` packet (server→client).
+///
+/// Wire format (SPEC §4.3):
+///   `[0x0B] [16 nonce] [u32 salt_len] [salt_b64] [u32 params_len] [m=..,t=..,p=..]`
+/// The trailing `m/t/p` tag carries the server's OWASP Argon2id parameters so the client
+/// derives its HMAC key from them instead of a frozen constant (kills the N1 lockstep mine).
 pub fn encode_auth_challenge(nonce: &[u8], argon2_salt_b64: &str) -> Vec<u8> {
     let mut w = PacketWriter::with_opcode(Opcode::AuthChallenge);
-    w.buf.extend_from_slice(nonce);           // 16 raw bytes
-    w.write_len_prefixed(argon2_salt_b64.as_bytes()); // u32 + B64 salt string
+    w.buf.extend_from_slice(nonce);                      // 16 raw bytes
+    w.write_len_prefixed(argon2_salt_b64.as_bytes());    // u32 + B64 salt string
+    w.write_len_prefixed(AUTH_CHALLENGE_PARAMS_TAG);     // u32 + "m=47104,t=3,p=1"
     w.into_bytes()
 }
 

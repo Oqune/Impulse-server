@@ -24,12 +24,16 @@ pub fn argon2_hash(input: &str) -> anyhow::Result<String> {
     use argon2::password_hash::{PasswordHasher, SaltString};
     use rand::rngs::OsRng;
     let salt = SaltString::generate(&mut OsRng);
-    // Use Argon2id explicitly to match argon2_verify which uses Argon2::new(Argon2id, ...).
-    // Argon2::default() may use Argon2i which would cause silent verification failures.
+    // OWASP-recommended Argon2id parameters (AGENTS.md §22-23 / SPEC X1):
+    //   m = 47104 KiB, t = 3 iterations, p = 1 lane.
+    // Never weaken — these are the canonical strength the client must also use
+    // (transmitted in the AuthChallenge, SPEC N1).
+    let params = argon2::Params::new(47104, 3, 1, None)
+        .map_err(|e| anyhow::anyhow!("failed to build OWASP Argon2 params: {e}"))?;
     let argon2 = argon2::Argon2::new(
         argon2::Algorithm::Argon2id,
         argon2::Version::V0x13,
-        argon2::Params::default(),
+        params,
     );
     argon2
         .hash_password(input.as_bytes(), &salt)
@@ -55,6 +59,23 @@ pub fn argon2_verify(password: &str, stored_hash: &str) -> bool {
         params,
     );
     argon2.verify_password(password.as_bytes(), &parsed).is_ok()
+}
+
+/// Extract the raw 32-byte Argon2id output directly from a stored hash string.
+///
+/// The client's Auth HMAC key is `HMAC(Argon2id(password, salt), nonce)`. Because the stored
+/// hash string encodes exactly `Argon2id(password, salt)`, its embedded output field *is* that
+/// key. The server therefore verifies the client's HMAC with this key **without ever receiving
+/// the password** (C3, §4.2) — fail-closed: if the stored hash has no output, verification
+/// cannot proceed.
+pub fn hmac_key_from_stored_hash(stored_hash: &str) -> anyhow::Result<Vec<u8>> {
+    use argon2::password_hash::PasswordHash;
+    let parsed = PasswordHash::new(stored_hash)
+        .map_err(|e| anyhow::anyhow!("failed to parse stored hash: {e}"))?;
+    match &parsed.hash {
+        Some(h) => Ok(h.as_bytes().to_vec()),
+        None => anyhow::bail!("stored Argon2 hash has no output field"),
+    }
 }
 
 #[cfg(test)]
