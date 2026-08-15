@@ -68,19 +68,21 @@ fn build_per_recipient_blob(
 fn relay_multi_client_sequence() {
     let password = "relay_test_pass";
     let stored_hash = argon2_hash(password).unwrap();
-    let nonce = vec![0xAA; 16];
 
-    // a. All 3 clients authenticate.
-    let client1_auth = build_client_auth(password, &nonce, &stored_hash);
-    let (h1, n1) = server_verify_auth(&client1_auth, &stored_hash, &nonce).unwrap();
+    // a. All 3 clients authenticate, each with its own single-use nonce (C4).
+    let nonce1: Vec<u8> = vec![0x01; 16];
+    let nonce2: Vec<u8> = vec![0x02; 16];
+    let nonce3: Vec<u8> = vec![0x03; 16];
+    let client1_auth = build_client_auth(password, &nonce1, &stored_hash);
+    let (h1, n1) = server_verify_auth(&client1_auth, &stored_hash, &nonce1).unwrap();
     assert!(h1 && n1, "Client 1 auth should succeed");
 
-    let client2_auth = build_client_auth(password, &nonce, &stored_hash);
-    let (h2, n2) = server_verify_auth(&client2_auth, &stored_hash, &nonce).unwrap();
+    let client2_auth = build_client_auth(password, &nonce2, &stored_hash);
+    let (h2, n2) = server_verify_auth(&client2_auth, &stored_hash, &nonce2).unwrap();
     assert!(h2 && n2, "Client 2 auth should succeed");
 
-    let client3_auth = build_client_auth(password, &nonce, &stored_hash);
-    let (h3, n3) = server_verify_auth(&client3_auth, &stored_hash, &nonce).unwrap();
+    let client3_auth = build_client_auth(password, &nonce3, &stored_hash);
+    let (h3, n3) = server_verify_auth(&client3_auth, &stored_hash, &nonce3).unwrap();
     assert!(h3 && n3, "Client 3 auth should succeed");
 
     // b/c. Client 1 sends Data, server stores it.
@@ -316,11 +318,12 @@ fn packet_length_consistency() {
     let nch = encode_new_cert_hash(&hash, 1_700_000_000);
     assert_eq!(nch.len(), 41);
 
-    // AuthChallenge: 1 + 16 + 4 + salt_b64.len()
+    // AuthChallenge: 1 + 16 + 4 + salt_b64.len() + 4 + params.len()  (params = "m=47104,t=3,p=1")
     let nonce = vec![0u8; 16];
     let salt_b64 = "c29tZXNhbHQ"; // "testsalt" in B64
+    let params = "m=47104,t=3,p=1";
     let ac = encode_auth_challenge(&nonce, salt_b64);
-    assert_eq!(ac.len(), 1 + 16 + 4 + salt_b64.len());
+    assert_eq!(ac.len(), 1 + 16 + 4 + salt_b64.len() + 4 + params.len());
 }
 
 // ---------------------------------------------------------------------------
@@ -331,15 +334,16 @@ fn packet_length_consistency() {
 fn e2e_full_lifecycle() {
     let password = "e2e_test_pass";
     let stored_hash = argon2_hash(password).unwrap();
-    let nonce = vec![0xBB; 16];
 
-    // 1-2. Client1 and Client2 authenticate.
-    let c1_auth = build_client_auth(password, &nonce, &stored_hash);
-    let (h1, n1) = server_verify_auth(&c1_auth, &stored_hash, &nonce).unwrap();
+    // 1-2. Client1 and Client2 authenticate (distinct single-use nonces, C4).
+    let nonce1: Vec<u8> = vec![0x0C; 16];
+    let nonce2: Vec<u8> = vec![0x0D; 16];
+    let c1_auth = build_client_auth(password, &nonce1, &stored_hash);
+    let (h1, n1) = server_verify_auth(&c1_auth, &stored_hash, &nonce1).unwrap();
     assert!(h1 && n1, "Client1 auth should succeed");
 
-    let c2_auth = build_client_auth(password, &nonce, &stored_hash);
-    let (h2, n2) = server_verify_auth(&c2_auth, &stored_hash, &nonce).unwrap();
+    let c2_auth = build_client_auth(password, &nonce2, &stored_hash);
+    let (h2, n2) = server_verify_auth(&c2_auth, &stored_hash, &nonce2).unwrap();
     assert!(h2 && n2, "Client2 auth should succeed");
 
     // 3-4. Both clients send key exchanges.

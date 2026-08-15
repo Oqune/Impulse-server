@@ -47,17 +47,19 @@ fn many_clients_per_recipient_isolation() {
     const N: usize = 8;
     let password = "stress_password";
     let stored_hash = argon2_hash(password).unwrap();
-    let nonce = vec![0x55; 16];
 
     // Each client authenticates (parallel simulation via collected auth frames).
     let mut auth_frames = Vec::with_capacity(N);
-    for _ in 0..N {
-        auth_frames.push(common::build_client_auth(password, &nonce, &stored_hash));
+    let mut auth_nonces: Vec<Vec<u8>> = Vec::with_capacity(N);
+    for i in 0..N {
+        let n: Vec<u8> = vec![0x20 + i as u8; 16];
+        auth_nonces.push(n.clone());
+        auth_frames.push(common::build_client_auth(password, &n, &stored_hash));
     }
-    // All must verify successfully.
-    for f in &auth_frames {
-        let (h, n) = common::server_verify_auth(f, &stored_hash, &nonce).unwrap();
-        assert!(h && n, "every client must authenticate");
+    // All must verify successfully (each with its own single-use nonce, C4).
+    for (f, n) in auth_frames.iter().zip(auth_nonces.iter()) {
+        let (h, nn) = common::server_verify_auth(f, &stored_hash, n).unwrap();
+        assert!(h && nn, "every client must authenticate");
     }
 
     // Unique recipient ids (simulating distinct KEM fingerprints).

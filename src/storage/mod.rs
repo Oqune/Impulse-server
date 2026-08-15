@@ -1,7 +1,7 @@
 //! Ephemeral, in-memory message storage.
 //!
 //! Messages are kept only in RAM (no persistence) and expire after a TTL of
-//! 72 hours. Each message carries:
+//! 24 hours. Each message carries:
 //!   * a monotonically increasing `u64` sequence id,
 //!   * the opaque encrypted payload (produced end-to-end by the clients),
 //!   * a creation timestamp.
@@ -15,7 +15,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
 /// How long a message stays available for late joiners before being dropped.
-pub const MESSAGE_TTL: Duration = Duration::from_secs(60 * 60 * 24 * 3); // 72 hours
+/// Reduced from 72h → 24h (SPEC C2, §2): shorter default outbox TTL so a blind
+/// `Sync` cannot replay the full multi-day backlog to an arbitrary client.
+pub const MESSAGE_TTL: Duration = Duration::from_secs(60 * 60 * 24); // 24 hours
 
 /// Hard cap on the number of retained messages (ring-buffer behaviour).
 pub const MAX_MESSAGES: usize = 10_000;
@@ -172,8 +174,8 @@ mod tests {
         assert_eq!(removed, 1);
         assert_eq!(store.len(), 1);
 
-        // MESSAGE_TTL must stay 72 hours for the compatibility tests.
-        assert_eq!(MESSAGE_TTL, Duration::from_secs(60 * 60 * 24 * 3));
+        // MESSAGE_TTL must stay 24 hours (SPEC C2, §2) — shortened from 72h.
+        assert_eq!(MESSAGE_TTL, Duration::from_secs(60 * 60 * 24));
     }
 
     #[test]
