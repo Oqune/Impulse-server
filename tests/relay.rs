@@ -350,13 +350,13 @@ fn e2e_full_lifecycle() {
     let c1_kem = vec![0x11u8; 1184]; // ML-KEM-768 size
     let c1_dsa = vec![0x22u8; 1952]; // ML-DSA-65 size
     let c1_ke = build_key_exchange(&c1_kem, &c1_dsa);
-    assert_eq!(c1_ke[0], 0x0C);
+    assert_eq!(c1_ke[0], 0x31);
     assert_eq!(try_read_packet(&c1_ke), TryReadResult::Packet(c1_ke.len()));
 
     let c2_kem = vec![0x33u8; 1184];
     let c2_dsa = vec![0x44u8; 1952];
     let c2_ke = build_key_exchange(&c2_kem, &c2_dsa);
-    assert_eq!(c2_ke[0], 0x0C);
+    assert_eq!(c2_ke[0], 0x31);
 
     // 5. Client1 sends a per-recipient data message for Client2.
     let store = MessageStore::new();
@@ -447,7 +447,7 @@ fn per_recipient_blob_parsing() {
 
 #[test]
 fn try_read_packet_all_opcodes() {
-    // Auth (0x01): C3 HMAC-only — opcode + u32 hmac_len(=32) + 32 HMAC
+    // Auth (0x12): C3 HMAC-only — opcode + u32 hmac_len(=32) + 32 HMAC
     let mut auth = PacketWriter::with_opcode(Opcode::Auth);
     auth.write_len_prefixed(&[0x42; 32]);
     let auth_bytes = auth.into_bytes();
@@ -456,13 +456,13 @@ fn try_read_packet_all_opcodes() {
         TryReadResult::Packet(auth_bytes.len())
     );
 
-    // Sync (0x03): opcode + u64
+    // Sync (0x33): opcode + u64
     let mut sync = PacketWriter::with_opcode(Opcode::Sync);
     sync.write_u64(42);
     let sync_bytes = sync.into_bytes();
     assert_eq!(try_read_packet(&sync_bytes), TryReadResult::Packet(9));
 
-    // Data (0x05): opcode + u32 len + payload (client→server format)
+    // Data (0x32): opcode + u32 len + payload (client→server format)
     let data_payload = b"hello world";
     let mut data = PacketWriter::with_opcode(Opcode::Data);
     data.write_len_prefixed(data_payload);
@@ -472,18 +472,18 @@ fn try_read_packet_all_opcodes() {
         TryReadResult::Packet(data_bytes.len())
     );
 
-    // Heartbeat (0x06): opcode + u64
+    // Heartbeat (0x21): opcode + u64
     let mut hb = PacketWriter::with_opcode(Opcode::Heartbeat);
     hb.write_u64(12345);
     let hb_bytes = hb.into_bytes();
     assert_eq!(try_read_packet(&hb_bytes), TryReadResult::Packet(9));
 
-    // KeyExchange (0x0C): opcode + u32 len + payload
+    // KeyExchange (0x31): opcode + u32 len + payload
     let ke = build_key_exchange(&[0x11; 32], &[0x22; 64]);
     assert_eq!(try_read_packet(&ke), TryReadResult::Packet(ke.len()));
 
-    // Disconnect (0x08): opcode only
-    assert_eq!(try_read_packet(&[0x08]), TryReadResult::Packet(1));
+    // Disconnect (0x23): opcode only
+    assert_eq!(try_read_packet(&[0x23]), TryReadResult::Packet(1));
 
     // Unknown opcodes
     assert_eq!(try_read_packet(&[0xFF]), TryReadResult::UnknownOpcode);
@@ -532,19 +532,19 @@ fn skip_byte_resilience() {
 #[test]
 fn fingerprint_of_keyexchange_matches_client_id() {
     // ML-KEM-768 / ML-DSA-65 public-key sizes, as sent by the Android client
-    // in the 0x0C KeyExchangeKemDsa packet right after auth.
+    // in the 0x31 KeyExchangeKemDsa packet right after auth.
     let kem = vec![0x5Au8; 1184];
     let dsa = vec![0x6Bu8; 1952];
     let packet = build_key_exchange(&kem, &dsa);
 
     let fp = impulse_server::relay::users::fingerprint_of_keyexchange(&packet)
-        .expect("valid 0x0C frame yields a fingerprint");
+        .expect("valid 0x31 frame yields a fingerprint");
     assert_eq!(fp.len(), 32);
     // Golden value: SHA-256(0x5A repeated 1184 times) hex, truncated to 32 —
     // exactly the client's SecureKeyManager.fingerprintForBytes output.
     assert_eq!(fp, "383e3a1e042cf51407cb723ec48b958e");
 
     // The frame the server relays to peers is byte-identical to the client's.
-    assert_eq!(packet[0], 0x0C);
+    assert_eq!(packet[0], 0x31);
     assert_eq!(try_read_packet(&packet), TryReadResult::Packet(packet.len()));
 }

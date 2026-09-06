@@ -29,14 +29,14 @@ sequence id, a timestamp, and per-message public keys. Messages live in RAM
 Key design points:
 
 - **Transport:** WebTransport over QUIC only (`wtransport` 0.7), TLS 1.3 mandatory.
-- **Protocol:** length-prefixed binary frames, opcodes `0x01`–`0x0C`, little-endian.
-- **Auth:** `AuthChallenge` (0x0B) with a 16-byte nonce + Argon2id salt → client
-  HMAC-SHA-256 response (`Auth`, 0x01) → constant-time verification.
+- **Protocol:** length-prefixed binary frames, opcodes `0x11`–`0x34`, little-endian.
+- **Auth:** `AuthChallenge` (0x11) with a 16-byte nonce + Argon2id salt + params → client
+  HMAC-SHA-256 response (`Auth`, 0x12) → constant-time verification.
 - **TLS / Certificates:** self-signed **ECDSA P-256**, valid **14 days**, rotated
   automatically with a **2-day overlap**. PEM persisted with `0600` (Unix) /
   restricted DACL (Windows).
 - **TOFU:** QR code with `impulse-cert:<sha256>`; clients pin
-  `serverCertificateHashes`. Rotation is announced via `NewCertHash` (0x07).
+  `serverCertificateHashes`. Rotation is announced via `NewCertHash` (0x22).
 - **Storage:** in-RAM ring buffer, 72h TTL, capped at `10_000` messages and `1 MB`
   per payload.
 - **Relay:** broadcast + `Sync { last_seen_id }` catch-up (≤ 2000 msgs); key
@@ -227,22 +227,20 @@ for the current device-support status.
 All frames: `[opcode: u8][...fields]`. Length-prefixed blobs are `u32 len`
 followed by `len` bytes.
 
-| Opcode | Dir | Name | Fields |
-|--------|-----|------|--------|
-| `0x01` | C→S | Auth | `u32 LE pwd_len` + raw password bytes + 32 raw HMAC-SHA-256 bytes |
-| `0x0B` | S→C | AuthChallenge | 16-byte nonce + `u32 LE salt_len` + B64 Argon2id salt |
-| `0x02` | S→C | AuthResult | `u8` status (`0x01`=success, `0x00`=failure) + optional `len`-prefixed error message |
-| `0x03` | C→S | Sync | `u64` last_seen_id |
-| `0x04` | S→C | SyncResponse | `u32` count, then per message: `u64 id`, `u64 ts`, `len`-prefixed payload |
-| `0x05` | C→S / S→C | Data | C→S: `len`-prefixed payload. S→C: `u64 id`, `u64 ts`, `len`-prefixed payload |
-| `0x06` | both | Heartbeat | `u64` client_timestamp (echoed back) |
-| `0x07` | S→C | NewCertHash | exactly 32 raw SHA-256 bytes + `u64` unix expiry |
-| `0x08` | both | Disconnect | no payload (graceful close from either side) |
-| `0x0C` | C→S / S→C | KeyExchangeKemDsa | combined ML-KEM + ML-DSA-65 public keys (relayed atomically) |
+| Opcode | Domain | Dir | Name | Fields |
+|--------|--------|-----|------|--------|
+| `0x11` | Auth | S→C | AuthChallenge | 16-byte nonce + `u32 LE salt_len` + B64 Argon2id salt + `u32 LE params_len` + params |
+| `0x12` | Auth | C→S | Auth | `u32 LE hmac_len=32` + 32 raw HMAC-SHA-256 proof bytes |
+| `0x13` | Auth | S→C | AuthResult | `u8` status (`0x01`=success, `0x00`=failure) + optional `len`-prefixed error message |
+| `0x21` | Session | both | Heartbeat | `u64` client_timestamp (echoed back) |
+| `0x22` | Session | S→C | NewCertHash | exactly 32 raw SHA-256 bytes + `u64` unix expiry |
+| `0x23` | Session | both | Disconnect | no payload (graceful close from either side) |
+| `0x31` | Data | C→S / S→C | KeyExchangeKemDsa | combined ML-KEM + ML-DSA-65 public keys (relayed atomically) |
+| `0x32` | Data | C→S / S→C | Data | C→S: `len`-prefixed payload. S→C: `u64 id`, `u64 ts`, `len`-prefixed payload |
+| `0x33` | Data | C→S | Sync | `u64` last_seen_id |
+| `0x34` | Data | S→C | SyncResponse | `u32` count, then per message: `u64 id`, `u64 ts`, `len`-prefixed payload |
 
-Opcodes `0x09`–`0x0A` are reserved/unused. The authoritative list is the
-`Opcode` enum in `src/protocol.rs`; it MUST stay in sync with the client's
-`transport/Protocol.kt`. Unknown/invalid client opcodes close the connection.
+The authoritative list is the `Opcode` enum in `src/protocol.rs`; it MUST stay in sync with the client's `transport/Protocol.kt`. Unknown/invalid client opcodes close the connection.
 
 Unknown/invalid client opcodes close the connection. Idle streams close after
 300 s. Sessions are capped at 1024 (unique `AtomicU64` ids); the aggregate buffer

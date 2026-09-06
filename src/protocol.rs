@@ -6,53 +6,79 @@
 //!
 //! The server never decrypts payloads; it only forwards opaque bytes.
 //!
-//! Opcodes:
-//! * `0x01` Auth          — client → server: password hash (UTF-8).
-//! * `0x02` AuthResult    — server → client: status byte + optional message.
-//! * `0x03` Sync          — client → server: `last_seen_id` (u64).
-//! * `0x04` SyncResponse  — server → client: count (u32) + messages.
-//! * `0x05` Data          — client → server: len (u32) + payload;
-//!   server → client: id (u64) + timestamp (u64) + len + payload.
-//! * `0x06` Heartbeat     — either direction: client timestamp (u64).
-//! * `0x07` NewCertHash   — server → client: 32 raw SHA-256 bytes + expiry (u64).
-//! * `0x08` Disconnect    — either direction: no payload.
-//! * `0x0B` AuthChallenge — server → client: 16-byte random nonce.
-//! * `0x0C` KeyExchangeKemDsa — either direction: combined KEM + DSA public keys.
+//! Opcodes (Domain-categorized):
+//! * Auth (0x1_):
+//!   * `0x11` AuthChallenge — server → client: 16-byte nonce + salt + Argon2 params.
+//!   * `0x12` Auth          — client → server: 32-byte HMAC-SHA-256 proof.
+//!   * `0x13` AuthResult    — server → client: status byte + optional message.
+//! * Session Control (0x2_):
+//!   * `0x21` Heartbeat     — either direction: client timestamp (u64).
+//!   * `0x22` NewCertHash   — server → client: 32 raw SHA-256 bytes + expiry (u64).
+//!   * `0x23` Disconnect    — either direction: no payload.
+//! * Data & Relay (0x3_):
+//!   * `0x31` KeyExchangeKemDsa — either direction: combined KEM + DSA keys + signature.
+//!   * `0x32` Data          — client → server: len (u32) + payload;
+//!     server → client: id (u64) + timestamp (u64) + len + payload.
+//!   * `0x33` Sync          — client → server: `last_seen_id` (u64).
+//!   * `0x34` SyncResponse  — server → client: count (u32) + messages.
 
 pub mod framing;
 pub mod limits;
+
+/// Functional category of a packet opcode (determined by high nibble).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpcodeCategory {
+    Auth,
+    Session,
+    Data,
+}
 
 /// Packet opcodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Opcode {
-    Auth = 0x01,
-    AuthResult = 0x02,
-    Sync = 0x03,
-    SyncResponse = 0x04,
-    Data = 0x05,
-    Heartbeat = 0x06,
-    NewCertHash = 0x07,
-    Disconnect = 0x08,
-    AuthChallenge = 0x0B,
-    KeyExchangeKemDsa = 0x0C,
+    // Auth domain (0x1_)
+    AuthChallenge = 0x11,
+    Auth = 0x12,
+    AuthResult = 0x13,
+
+    // Session control domain (0x2_)
+    Heartbeat = 0x21,
+    NewCertHash = 0x22,
+    Disconnect = 0x23,
+
+    // Data & Relay domain (0x3_)
+    KeyExchangeKemDsa = 0x31,
+    Data = 0x32,
+    Sync = 0x33,
+    SyncResponse = 0x34,
 }
 
 impl Opcode {
     /// Parse an opcode from its byte representation.
     pub fn from_u8(value: u8) -> Option<Opcode> {
         match value {
-            0x01 => Some(Opcode::Auth),
-            0x02 => Some(Opcode::AuthResult),
-            0x03 => Some(Opcode::Sync),
-            0x04 => Some(Opcode::SyncResponse),
-            0x05 => Some(Opcode::Data),
-            0x06 => Some(Opcode::Heartbeat),
-            0x07 => Some(Opcode::NewCertHash),
-            0x08 => Some(Opcode::Disconnect),
-            0x0B => Some(Opcode::AuthChallenge),
-            0x0C => Some(Opcode::KeyExchangeKemDsa),
+            0x11 => Some(Opcode::AuthChallenge),
+            0x12 => Some(Opcode::Auth),
+            0x13 => Some(Opcode::AuthResult),
+            0x21 => Some(Opcode::Heartbeat),
+            0x22 => Some(Opcode::NewCertHash),
+            0x23 => Some(Opcode::Disconnect),
+            0x31 => Some(Opcode::KeyExchangeKemDsa),
+            0x32 => Some(Opcode::Data),
+            0x33 => Some(Opcode::Sync),
+            0x34 => Some(Opcode::SyncResponse),
             _ => None,
+        }
+    }
+
+    /// Functional category / domain of this opcode.
+    pub fn category(self) -> OpcodeCategory {
+        match (self.as_u8() >> 4) & 0x0F {
+            0x1 => OpcodeCategory::Auth,
+            0x2 => OpcodeCategory::Session,
+            0x3 => OpcodeCategory::Data,
+            _ => unreachable!(),
         }
     }
 
@@ -64,16 +90,16 @@ impl Opcode {
     /// Human-readable opcode name for logs and the TUI.
     pub fn display_name(self) -> &'static str {
         match self {
+            Opcode::AuthChallenge => "AuthChallenge",
             Opcode::Auth => "Auth",
             Opcode::AuthResult => "AuthResult",
-            Opcode::Sync => "Sync",
-            Opcode::SyncResponse => "SyncResponse",
-            Opcode::Data => "Data",
             Opcode::Heartbeat => "Heartbeat",
             Opcode::NewCertHash => "NewCertHash",
             Opcode::Disconnect => "Disconnect",
-            Opcode::AuthChallenge => "AuthChallenge",
             Opcode::KeyExchangeKemDsa => "KeyExchangeKemDsa",
+            Opcode::Data => "Data",
+            Opcode::Sync => "Sync",
+            Opcode::SyncResponse => "SyncResponse",
         }
     }
 }
@@ -347,7 +373,7 @@ mod protocol_tests {
         let mut w = PacketWriter::with_opcode(Opcode::Auth);
         w.write_len_prefixed(b"secret");
         let bytes = w.into_bytes();
-        assert_eq!(bytes[0], 0x01);
+        assert_eq!(bytes[0], 0x12);
         let mut r = PacketReader::new(&bytes);
         assert_eq!(r.read_opcode().unwrap(), Opcode::Auth);
         assert_eq!(r.read_len_prefixed().unwrap(), b"secret");
@@ -365,7 +391,7 @@ mod protocol_tests {
 
     #[test]
     fn truncated_packet_errors() {
-        let buf = [0x03u8, 0x01]; // Sync opcode + only 1 of 8 bytes
+        let buf = [0x33u8, 0x01]; // Sync opcode + only 1 of 8 bytes
         let mut r = PacketReader::new(&buf);
         assert_eq!(r.read_opcode().unwrap(), Opcode::Sync);
         assert!(matches!(r.read_u64(), Err(ProtocolError::UnexpectedEof)));
@@ -375,7 +401,7 @@ mod protocol_tests {
     fn new_cert_hash_is_exactly_32_bytes_then_u64() {
         let hash = [0xABu8; 32];
         let bytes = encode_new_cert_hash(&hash, 1_700_000_000);
-        assert_eq!(bytes[0], 0x07);
+        assert_eq!(bytes[0], 0x22);
         assert_eq!(&bytes[1..33], &hash[..]);
         assert_eq!(&bytes[33..41], &1_700_000_000u64.to_le_bytes());
         assert_eq!(bytes.len(), 41);
@@ -384,7 +410,7 @@ mod protocol_tests {
     #[test]
     fn data_packet_layout() {
         let bytes = encode_data(7, 12345, b"hello");
-        assert_eq!(bytes[0], 0x05);
+        assert_eq!(bytes[0], 0x32);
         let mut r = PacketReader::new(&bytes);
         r.read_opcode().unwrap();
         assert_eq!(r.read_u64().unwrap(), 7);
@@ -396,7 +422,7 @@ mod protocol_tests {
     fn sync_response_count_and_messages() {
         let msgs = vec![(1u64, 10u64, b"a".to_vec()), (2u64, 20u64, b"bb".to_vec())];
         let bytes = encode_sync_response(&msgs);
-        assert_eq!(bytes[0], 0x04);
+        assert_eq!(bytes[0], 0x34);
         let mut r = PacketReader::new(&bytes);
         r.read_opcode().unwrap();
         assert_eq!(r.read_u32().unwrap(), 2);
@@ -409,10 +435,10 @@ mod protocol_tests {
     #[test]
     fn auth_result_status_byte() {
         let ok = encode_auth_result(true, None);
-        assert_eq!(ok[0], 0x02);
+        assert_eq!(ok[0], 0x13);
         assert_eq!(ok[1], 0x01);
         let fail = encode_auth_result(false, Some("bad"));
-        assert_eq!(fail[0], 0x02);
+        assert_eq!(fail[0], 0x13);
         assert_eq!(fail[1], 0x00);
         // payload is length-prefixed: u32 len (3) then "bad".
         assert_eq!(&fail[2..6], &3u32.to_le_bytes());
@@ -580,7 +606,7 @@ mod combined_key_exchange_tests {
         let dsa = vec![0xCD; 1952];
 
         let frame = build_client_combined_key_exchange(&kem, &dsa);
-        assert_eq!(frame[0], 0x0C);
+        assert_eq!(frame[0], 0x31);
 
         assert_eq!(try_read_packet(&frame), TryReadResult::Packet(frame.len()));
 
@@ -588,7 +614,7 @@ mod combined_key_exchange_tests {
         assert_eq!(relayed, frame);
     }
 
-    // ── 9. OP_DATA is NOT confused with 0x0C ──────────────────────────────────
+    // ── 9. OP_DATA is NOT confused with 0x31 ──────────────────────────────────
     #[test]
     fn data_and_keyexchange_opcodes_distinguished() {
         let payload = b"hello world";
@@ -601,8 +627,8 @@ mod combined_key_exchange_tests {
         let dsa = vec![0x22; 32];
         let ke_frame = build_client_combined_key_exchange(&kem, &dsa);
 
-        assert_eq!(data_frame[0], 0x05);
-        assert_eq!(ke_frame[0], 0x0C);
+        assert_eq!(data_frame[0], 0x32);
+        assert_eq!(ke_frame[0], 0x31);
 
         let data_len = u32::from_le_bytes([data_frame[1], data_frame[2], data_frame[3], data_frame[4]]);
         assert_eq!(data_len as usize, payload.len());
@@ -619,7 +645,7 @@ mod combined_key_exchange_tests {
             let dsa = vec![(i * 13 % 256) as u8; 64 + i * 20];
 
             let frame = build_client_combined_key_exchange(&kem, &dsa);
-            assert_eq!(frame[0], 0x0C);
+            assert_eq!(frame[0], 0x31);
 
             assert_eq!(try_read_packet(&frame), TryReadResult::Packet(frame.len()));
 

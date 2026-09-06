@@ -70,10 +70,12 @@ fn attack_oversized_frame_is_rejected() {
         oversized,
         MAX_PAYLOAD_BYTES
     );
-    assert!(
-        MAX_PAYLOAD_BYTES <= 1_000_000,
-        "N2/N3: server ceiling must not exceed 1_000_000"
-    );
+    const {
+        assert!(
+            MAX_PAYLOAD_BYTES <= 1_000_000,
+            "N2/N3: server ceiling must not exceed 1_000_000"
+        );
+    }
     // And the max acceptable full packet is bounded too.
     assert_eq!(MAX_PACKET_LEN, 1 + 4 + MAX_PAYLOAD_BYTES);
 }
@@ -86,7 +88,7 @@ fn attack_rogue_relay_sees_only_opaque_payload() {
     // verbatim and has no code path that decrypts it.
     let store = MessageStore::new();
     let ciphertext = b"AES-GCM(opaque to relay): random-looking bytes".to_vec();
-    let stored = store.push(ciphertext.clone());
+    let _id = store.push(ciphertext.clone());
     let fetched = store.since(0, 10);
     assert_eq!(fetched.len(), 1, "relay must forward exactly what it stored");
     assert_eq!(

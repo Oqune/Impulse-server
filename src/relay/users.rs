@@ -16,9 +16,9 @@ use crate::ui::view::UserRow;
 /// Lowercase-hex SHA-256 of a KEM public key, truncated to 32 chars. This is
 /// the server-side user identifier and the key of the [`UserRegistry`].
 ///
-/// Parses the exact client wire format for `0x0C KeyExchangeKemDsa`:
-/// `[0x0C] [u32 inner_len] [u32 kem_len] [kem] [u32 dsa_len] [dsa]`.
-/// Returns `None` for non-`0x0C` or malformed frames.
+/// Parses the exact client wire format for `0x31 KeyExchangeKemDsa`:
+/// `[0x31] [u32 inner_len] [u32 kem_len] [kem] [u32 dsa_len] [dsa]`.
+/// Returns `None` for non-`0x31` or malformed frames.
 pub fn fingerprint_of_keyexchange(packet: &[u8]) -> Option<String> {
     if packet.len() < 13 || packet[0] != Opcode::KeyExchangeKemDsa.as_u8() {
         return None;
@@ -153,7 +153,7 @@ mod tests {
     fn kem_packet(kem: &[u8], dsa: &[u8]) -> Vec<u8> {
         let inner = 4 + kem.len() + 4 + dsa.len();
         let mut p = Vec::with_capacity(1 + 4 + inner);
-        p.push(0x0C);
+        p.push(0x31);
         p.extend_from_slice(&(inner as u32).to_le_bytes());
         p.extend_from_slice(&(kem.len() as u32).to_le_bytes());
         p.extend_from_slice(kem);
@@ -176,17 +176,17 @@ mod tests {
     #[test]
     fn fingerprint_rejects_malformed_frames() {
         assert_eq!(fingerprint_of_keyexchange(&[]), None);
-        assert_eq!(fingerprint_of_keyexchange(&[0x0C]), None);
+        assert_eq!(fingerprint_of_keyexchange(&[0x31]), None);
         let good = kem_packet(b"abc", b"def");
         assert_eq!(fingerprint_of_keyexchange(&good[..good.len() - 1]), None);
         let mut wrong = good.clone();
-        wrong[0] = 0x05;
+        wrong[0] = 0x32;
         assert_eq!(fingerprint_of_keyexchange(&wrong), None);
     }
 
     #[test]
     fn fingerprint_rejects_oversized_kem_len() {
-        let mut p = vec![0x0C];
+        let mut p = vec![0x31];
         p.extend_from_slice(&8u32.to_le_bytes()); // inner_len = 8
         p.extend_from_slice(&u32::MAX.to_le_bytes()); // kem_len = u32::MAX
         p.extend_from_slice(b"abcd");

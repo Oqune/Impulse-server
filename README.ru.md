@@ -30,14 +30,14 @@ Impulse — это relay-сервер для end-to-end-encrypted мессенд
 Ключевые архитектурные решения:
 
 - **Транспорт:** только WebTransport поверх QUIC (`wtransport` 0.7), TLS 1.3 обязателен.
-- **Протокол:** length-prefixed бинарные фреймы, опкоды `0x01`–`0x0C`, little-endian.
-- **Аутентификация:** `AuthChallenge` (0x0B) с 16-байтным nonce и Argon2id-солью →
-  клиент отвечает HMAC-SHA-256 (`Auth`, 0x01) → проверка в constant time.
+- **Протокол:** length-prefixed бинарные фреймы, опкоды `0x11`–`0x34`, little-endian.
+- **Аутентификация:** `AuthChallenge` (0x11) с 16-байтным nonce, Argon2id-солью и параметрами →
+  клиент отвечает HMAC-SHA-256 (`Auth`, 0x12) → проверка в constant time.
 - **TLS / Сертификаты:** самоподписанные **ECDSA P-256**, срок **14 дней**,
   автоматическая ротация с **2-дневным окном перекрытия**. PEM сохраняется с
   правами `0600` (Unix) / эксклюзивным DACL (Windows).
 - **TOFU:** QR-код с `impulse-cert:<sha256>`; клиенты закрепляют
-  `serverCertificateHashes`. Ротация анонсируется через `NewCertHash` (0x07).
+  `serverCertificateHashes`. Ротация анонсируется через `NewCertHash` (0x22).
 - **Хранилище:** in-RAM ring buffer, TTL 72 ч, ограничение `10_000` сообщений и
   `1 MB` на сообщение.
 - **Relay:** broadcast + догонка через `Sync { last_seen_id }` (≤ 2000 сообщений);
@@ -229,20 +229,20 @@ x86_64, x86 + universal). JVM unit-тесты проходят; on-device/instru
 
 Все фреймы: `[opcode: u8][...поля]`. Length-prefixed блобы — `u32 len` затем `len` байт.
 
-| Opcode | Напр. | Имя | Поля |
-|--------|-------|-----|------|
-| `0x01` | C→S | Auth | `u32 LE pwd_len`, `pwd_len` байт пароля (UTF-8), 32 сырых байта HMAC-SHA-256 |
-| `0x0B` | S→C | AuthChallenge | 16 байт nonce + `u32 LE salt_len`, `salt_len` байт B64 Argon2id соли |
-| `0x02` | S→C | AuthResult | `u8` статус (`0x01`=успех, `0x00`=ошибка) + опциональный `len`-prefixed текст ошибки |
-| `0x03` | C→S | Sync | `u64` last_seen_id |
-| `0x04` | S→C | SyncResponse | `u32` count, затем для каждого сообщения: `u64 id`, `u64 ts`, `len`-prefixed payload |
-| `0x05` | C→S / S→C | Data | C→S: `len`-prefixed payload. S→C: `u64 id`, `u64 ts`, `len`-prefixed payload |
-| `0x06` | обе | Heartbeat | `u64` client_timestamp (эхо-ответ) |
-| `0x07` | S→C | NewCertHash | ровно 32 сырых байта SHA-256 + `u64` unix expiry |
-| `0x08` | обе | Disconnect | без payload (корректное закрытие с любой стороны) |
-| `0x0C` | C→S / S→C | KeyExchangeKemDsa | комбинированный ML-KEM + ML-DSA-65 публичные ключи (ретранслируется атомарно) |
+| Opcode | Домен | Напр. | Имя | Поля |
+|--------|-------|-------|-----|------|
+| `0x11` | Auth | S→C | AuthChallenge | 16 байт nonce + `u32 LE salt_len`, `salt_len` байт B64 Argon2id соли + `u32 LE params_len` + параметры |
+| `0x12` | Auth | C→S | Auth | `u32 LE hmac_len=32` + 32 сырых байта HMAC-SHA-256 доказательства |
+| `0x13` | Auth | S→C | AuthResult | `u8` статус (`0x01`=успех, `0x00`=ошибка) + опциональный `len`-prefixed текст ошибки |
+| `0x21` | Session | обе | Heartbeat | `u64` client_timestamp (эхо-ответ) |
+| `0x22` | Session | S→C | NewCertHash | ровно 32 сырых байта SHA-256 + `u64` unix expiry |
+| `0x23` | Session | обе | Disconnect | без payload (корректное закрытие с любой стороны) |
+| `0x31` | Data | C→S / S→C | KeyExchangeKemDsa | комбинированный ML-KEM + ML-DSA-65 публичные ключи (ретранслируется атомарно) |
+| `0x32` | Data | C→S / S→C | Data | C→S: `len`-prefixed payload. S→C: `u64 id`, `u64 ts`, `len`-prefixed payload |
+| `0x33` | Data | C→S | Sync | `u64` last_seen_id |
+| `0x34` | Data | S→C | SyncResponse | `u32` count, затем для каждого сообщения: `u64 id`, `u64 ts`, `len`-prefixed payload |
 
-Неизвестные/невалидные опкоды от клиента закрывают соединение. Простаивающие
+Авторитетный список — enum `Opcode` в `src/protocol.rs`; он ОБЯЗАН оставаться синхронизированным с `transport/Protocol.kt` клиента. Неизвестные/невалидные опкоды от клиента закрывают соединение.
 стримы закрываются через 300 с. Сессии лимитированы 1024 (уникальные
 `AtomicU64` id); агрегатный буфер ограничен 512 МБ; полезные нагрузки более
 1 MB отбрасываются; один `Sync` возвращает не более 2000 сообщений. Парсер

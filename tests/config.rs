@@ -165,7 +165,7 @@ fn config_file_loaded_reports_discovery() {
     let cfg_path = dir.join("config.toml");
     std::fs::write(
         &cfg_path,
-        &format!("[server]\npassword_hash = \"{TEST_HASH}\"\n"),
+        format!("[server]\npassword_hash = \"{TEST_HASH}\"\n"),
     )
     .unwrap();
 

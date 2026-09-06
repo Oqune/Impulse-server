@@ -133,12 +133,12 @@ fn auth_packet_wire_layout() {
 
     let packet = build_client_auth(password, &nonce, &argon2_hash(password).unwrap());
 
-    // Byte 0: opcode 0x01
-    assert_eq!(packet[0], 0x01);
+    // Byte 0: opcode 0x12
+    assert_eq!(packet[0], 0x12);
 
     // C3 (HMAC-only): bytes 1-4 = hmac length (u32 LE), must be 32.
     let hmac_len = u32::from_le_bytes([packet[1], packet[2], packet[3], packet[4]]);
-    assert_eq!(hmac_len, 32, "C3: 0x01 must carry a 32-byte HMAC, not a password");
+    assert_eq!(hmac_len, 32, "C3: 0x12 must carry a 32-byte HMAC, not a password");
 
     // The raw password must NOT appear anywhere on the wire.
     assert!(
@@ -190,7 +190,7 @@ fn auth_packet_full_wire_format() {
 
     // NEW wire layout (C3 §4.2): opcode + u32 hmac_len(=32) + 32-byte HMAC response.
     // The raw password NEVER travels on the wire.
-    assert_eq!(packet[0], 0x01);
+    assert_eq!(packet[0], 0x12);
     let hmac_len = u32::from_le_bytes(packet[1..5].try_into().unwrap());
     assert_eq!(hmac_len, 32);
     assert_eq!(packet.len(), 1 + 4 + 32);
@@ -262,7 +262,7 @@ fn auth_packet_boundary_conditions() {
 #[test]
 fn auth_packet_malformed_input() {
     // a) Truncated pwd_len field (only 3 bytes instead of 4)
-    let buf = [0x01u8, 0x04, 0x00, 0x00];
+    let buf = [Opcode::Auth.as_u8(), 0x04, 0x00, 0x00];
     let mut r = PacketReader::new(&buf);
     assert_eq!(r.read_opcode().unwrap(), Opcode::Auth);
     assert!(matches!(
@@ -342,7 +342,7 @@ fn sync_roundtrip() {
     let bytes = w.into_bytes();
 
     assert_eq!(bytes.len(), 1 + 8);
-    assert_eq!(bytes[0], 0x03);
+    assert_eq!(bytes[0], 0x33);
 
     let mut r = PacketReader::new(&bytes);
     assert_eq!(r.read_opcode().unwrap(), Opcode::Sync);
@@ -357,7 +357,7 @@ fn data_roundtrip_with_timestamps() {
     let payload = b"encrypted_message_data";
 
     let bytes = encode_data(id, timestamp, payload);
-    assert_eq!(bytes[0], 0x05);
+    assert_eq!(bytes[0], 0x32);
 
     let mut r = PacketReader::new(&bytes);
     assert_eq!(r.read_opcode().unwrap(), Opcode::Data);
@@ -377,7 +377,7 @@ fn heartbeat_roundtrip() {
     let bytes = encode_heartbeat(timestamp);
 
     assert_eq!(bytes.len(), 1 + 8);
-    assert_eq!(bytes[0], 0x06);
+    assert_eq!(bytes[0], 0x21);
 
     let mut r = PacketReader::new(&bytes);
     assert_eq!(r.read_opcode().unwrap(), Opcode::Heartbeat);
@@ -398,7 +398,7 @@ fn full_handshake_sequence() {
         parsed.salt.map(|s| s.to_string()).unwrap_or_default()
     };
     let challenge_packet = encode_auth_challenge(&server_nonce, &argon2_salt_b64);
-    assert_eq!(challenge_packet[0], 0x0B);
+    assert_eq!(challenge_packet[0], 0x11);
     assert_eq!(&challenge_packet[1..17], &server_nonce[..]);
 
     // b. Client parses AuthChallenge, extracts nonce + salt.
@@ -412,7 +412,7 @@ fn full_handshake_sequence() {
 
     // c. Client derives the Argon2 key and builds the Auth packet.
     let auth_packet = build_client_auth(password, &client_nonce, &stored_hash);
-    assert_eq!(auth_packet[0], 0x01);
+    assert_eq!(auth_packet[0], 0x12);
 
     // d. Server parses Auth and verifies.
     let (hash_ok, nonce_valid) =
@@ -422,7 +422,7 @@ fn full_handshake_sequence() {
 
     // e. Server builds AuthResult (success).
     let success_result = encode_auth_result(true, None);
-    assert_eq!(success_result[0], 0x02);
+    assert_eq!(success_result[0], 0x13);
     assert_eq!(success_result[1], 0x01);
 
     // f. Client parses AuthResult.

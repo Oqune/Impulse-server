@@ -31,12 +31,12 @@ pub fn try_read_packet(buf: &[u8]) -> TryReadResult {
     }
     let opcode = buf[0];
     let min_len = match opcode {
-        0x01 => 1 + 4 + 32,  // Auth: opcode + len prefix + fixed 32-byte HMAC
-        0x03 => 1 + 8,       // Sync: opcode + u64
-        0x05 => 1 + 4,       // Data: opcode + len prefix
-        0x06 => 1 + 8,       // Heartbeat: opcode + u64
-        0x08 => 1,           // Disconnect: opcode only, no payload
-        0x0C => 1 + 4,       // KeyExchangeKemDsa: opcode + len prefix
+        0x12 => 1 + 4 + 32,  // Auth: opcode + len prefix + fixed 32-byte HMAC
+        0x21 => 1 + 8,       // Heartbeat: opcode + u64
+        0x23 => 1,           // Disconnect: opcode only, no payload
+        0x31 => 1 + 4,       // KeyExchangeKemDsa: opcode + len prefix
+        0x32 => 1 + 4,       // Data: opcode + len prefix
+        0x33 => 1 + 8,       // Sync: opcode + u64
         _ => return TryReadResult::UnknownOpcode,
     };
     if buf.len() < min_len {
@@ -44,11 +44,11 @@ pub fn try_read_packet(buf: &[u8]) -> TryReadResult {
     }
 
     let len = match opcode {
-        0x01 => {
+        0x12 => {
             if buf.len() < 5 {
                 return TryReadResult::Incomplete;
             }
-            // C3 (HMAC-only): [0x01][u32 hmac_len=32][32 hmac]. No password on
+            // C3 (HMAC-only): [0x12][u32 hmac_len=32][32 hmac]. No password on
             // the wire — only a fixed 32-byte HMAC response.
             let hmac_len = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
             if hmac_len != 32 {
@@ -60,16 +60,16 @@ pub fn try_read_packet(buf: &[u8]) -> TryReadResult {
             }
             return TryReadResult::Packet(total);
         }
-        0x05 | 0x0C => {
+        0x31 | 0x32 => {
             if buf.len() < 5 {
                 return TryReadResult::Incomplete;
             }
             u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize
         }
-        0x03 | 0x06 => {
+        0x21 | 0x33 => {
             return TryReadResult::Packet(9);
         }
-        0x08 => {
+        0x23 => {
             return TryReadResult::Packet(1);
         }
         _ => return TryReadResult::UnknownOpcode,
@@ -82,7 +82,7 @@ pub fn try_read_packet(buf: &[u8]) -> TryReadResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{TryReadResult, try_read_packet};
+    use super::{try_read_packet, TryReadResult};
     use crate::protocol::{Opcode, PacketWriter};
 
     fn data_frame(payload_len: usize) -> Vec<u8> {
@@ -98,13 +98,13 @@ mod tests {
         // Data: opcode + u32 len + payload
         assert_eq!(try_read_packet(&data_frame(10)), TryReadResult::Packet(1 + 4 + 10));
         // Truncated Data header
-        assert_eq!(try_read_packet(&[0x05, 0x00]), TryReadResult::Incomplete);
+        assert_eq!(try_read_packet(&[0x32, 0x00]), TryReadResult::Incomplete);
         // Sync: opcode + u64
-        assert_eq!(try_read_packet(&[0x03, 1, 2, 3, 4, 5, 6, 7, 8]), TryReadResult::Packet(9));
+        assert_eq!(try_read_packet(&[0x33, 1, 2, 3, 4, 5, 6, 7, 8]), TryReadResult::Packet(9));
         // Disconnect: opcode only
-        assert_eq!(try_read_packet(&[0x08]), TryReadResult::Packet(1));
+        assert_eq!(try_read_packet(&[0x23]), TryReadResult::Packet(1));
         // Disconnect with trailing junk is still recognized (single-byte frame)
-        assert_eq!(try_read_packet(&[0x08, 0x99]), TryReadResult::Packet(1));
+        assert_eq!(try_read_packet(&[0x23, 0x99]), TryReadResult::Packet(1));
     }
 
     #[test]
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn auth_uses_minimum_length_with_hmac() {
-        // C3 (HMAC-only): 0x01 + len-prefixed 32-byte HMAC. No password on wire.
+        // C3 (HMAC-only): 0x12 + len-prefixed 32-byte HMAC. No password on wire.
         let mut w = PacketWriter::with_opcode(Opcode::Auth);
         w.write_len_prefixed(&[0u8; 32]);
         let bytes = w.into_bytes();

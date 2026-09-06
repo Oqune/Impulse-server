@@ -324,7 +324,7 @@ pub(crate) async fn process_packet(
             );
 
             // Build relay packet preserving the original client frame format:
-            // [0x0C] [u32: total_inner] [u32: kem_len] [kem] [u32: dsa_len] [dsa]
+            // [0x31] [u32: total_inner] [u32: kem_len] [kem] [u32: dsa_len] [dsa]
             // combined_payload already contains everything after the opcode byte
             // (including the outer u32 total_inner), so just prepend the opcode.
             let mut packet = vec![opcode.as_u8()];
@@ -338,7 +338,7 @@ pub(crate) async fn process_packet(
                 .push(packet);
             debug!("[KEYEX] Session {} relayed combined KEM+DSA to all peers", session_key);
             // Derive the user identity from the KEM public key (no wire change).
-            // First 0x0C of a session binds it to the user; a re-sent 0x0C
+            // First 0x31 of a session binds it to the user; a re-sent 0x31
             // (peer key request) only refreshes last_seen.
             if session.user.is_none() {
                 if let Some(fp) = crate::relay::users::fingerprint_of_keyexchange(packet_data) {
