@@ -1,6 +1,6 @@
 # AGENTS.md — Impulse Server (Rust)
 
-Дополнение к корневому `../AGENTS.md` и `../AI_MANIFESTO.md`. Специфика серверного компонента.
+Дополнение к `PROJECT.md` и `AI_MANIFESTO.md`. Специфика серверного компонента.
 
 ## Стек и архитектура
 - **Язык & компилятор:** Rust (edition 2024, MSRV 1.85), `tokio`, `wtransport` (WebTransport/QUIC, порт 4433).
