@@ -1,65 +1,149 @@
-<System_Note>
-# deploy-server.ps1 — автоматизация деплоя Impulse Server на Win-сервер 192.168.1.100
-# Запускать НА ПК (192.168.1.50), откуда собирается код.
-# Требует: Rust/cargo в PATH, доступ по SSH к 192.168.1.100 (локальный аккаунт).
-#
-# ПЕРЕД ПЕРВЫМ ЗАПУСКОМ заполнить переменные ниже (или через env):
-#   $env:WINSRV_USER = "локальный_юзер_на_1.100"
-#   $env:WINSRV_PASS = "пароль"   # лучше через pass: sshpass -p (pass show hermes/winserver) ...
-#
-# Безопасность: config.toml (с Argon2-hash пароля) копируется ТОЛЬКО на 1.100,
-# не попадает в git/OKF/логи. Не светить пароль в командной строке.
-</System_Note>
+# scripts/deploy-server.ps1
+# Автоматизированный деплой Impulse Server на Windows-хосте
+# Политика: docs/policies/deploy.md
 
-param(
-    [string]$WinSrv   = "192.168.1.100",
-    [string]$User     = $env:WINSRV_USER,
-    [string]$Pass     = $env:WINSRV_PASS,
-    [string]$RemoteDir = "C:\Users\$env:USERNAME\Desktop\ImpulseServer",
-    [string]$LocalServerDir = "D:\Data\projects\ImpulseProject\server",
-    [int]$Port = 4433
+param (
+    [string]$TargetDir = "",
+    [string]$RemoteHost = "",
+    [string]$User = $env:WINSRV_USER,
+    [string]$Pass = $env:WINSRV_PASS,
+    [int]$Port = 4433,
+    [switch]$SkipTests = $false
 )
 
 $ErrorActionPreference = "Stop"
 
-if (-not $User -or -not $Pass) {
-    Write-Error "Не заданы WINSRV_USER / WINSRV_PASS. Задайте переменные окружения."
+Write-Host "==========================================" -ForegroundColor Cyan
+Write-Host "       Impulse Server Deploy Script       " -ForegroundColor Cyan
+Write-Host "==========================================" -ForegroundColor Cyan
+Write-Host ""
+
+# Определение каталога сервера относительно скрипта
+$ServerDir = if (Test-Path (Join-Path $PSScriptRoot "..\Cargo.toml")) {
+    $PSScriptRoot | Split-Path -Parent
+} elseif (Test-Path (Join-Path $PSScriptRoot "..\server\Cargo.toml")) {
+    Join-Path $PSScriptRoot "..\server"
+} else {
+    $PWD.Path
+}
+
+if (!(Test-Path (Join-Path $ServerDir "Cargo.toml"))) {
+    Write-Error "Каталог сервера с Cargo.toml не найден: $ServerDir"
     exit 1
 }
 
-$securePass = ConvertTo-SecureString $Pass -AsPlainText -Force
-$cred = New-Object System.Management.Automation.PSCredential ($User, $securePass)
+# 1. Test-Gate
+if (-not $SkipTests) {
+    Write-Host "[1/4] Запуск проверочных тестов (Test-Gate)..." -ForegroundColor Yellow
+    Push-Location $ServerDir
+    try {
+        cargo test
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Тесты завершились с ошибкой. Деплой прерван!"
+            exit 1
+        }
+        cargo clippy --all-targets -- -D warnings
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Clippy обнаружил предупреждения. Деплой прерван!"
+            exit 1
+        }
+    } finally {
+        Pop-Location
+    }
+    Write-Host " Тест-гейт успешно пройден." -ForegroundColor Green
+} else {
+    Write-Host "[1/4] Пропуск тестов (--SkipTests указан)..." -ForegroundColor DarkGray
+}
 
-Write-Host "[1/5] Сборка server (cargo build --release)..."
-Push-Location $LocalServerDir
+# 2. Release Build
+Write-Host "[2/4] Сборка release-бинаря (cargo build --release)..." -ForegroundColor Yellow
+Push-Location $ServerDir
 try {
     cargo build --release
-    if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Сборка завершилась с ошибкой!"
+        exit 1
+    }
 } finally {
     Pop-Location
 }
-$bin = Join-Path $LocalServerDir "target\release\impulse-server.exe"
-if (-not (Test-Path $bin)) { throw "Бинарь не собран: $bin" }
 
-Write-Host "[2/5] Остановка старого процесса на $WinSrv..."
-$stopScript = "Stop-Process -Name impulse-server -Force -ErrorAction SilentlyContinue"
-Invoke-Command -ComputerName $WinSrv -Credential $cred -ScriptBlock { param($s) iex $s } -ArgumentList $stopScript
+$BinaryPath = Join-Path $ServerDir "target\release\impulse-server.exe"
+if (!(Test-Path $BinaryPath)) {
+    Write-Error "Исполняемый файл не найден: $BinaryPath"
+    exit 1
+}
+Write-Host " Бинарь успешно собран: $BinaryPath" -ForegroundColor Green
 
-Write-Host "[3/5] Копирование бинаря + config.toml на $WinSrv..."
-# Создаём папку и копируем через SMB admin-share (C$)
-$remotePath = "\\$WinSrv\C$\Users\$User\Desktop\ImpulseServer"
-New-Item -ItemType Directory -Force -Path $remotePath | Out-Null
-Copy-Item $bin -Destination "$remotePath\impulse-server.exe" -Force
-Copy-Item (Join-Path $LocalServerDir "config.toml") -Destination "$remotePath\config.toml" -Force
+# 3. Деплой (локальный или удаленный)
+if ($RemoteHost -and $RemoteHost.Trim() -ne "") {
+    Write-Host "[3/4] Удаленный деплой на $RemoteHost..." -ForegroundColor Yellow
+    if (-not $User -or -not $Pass) {
+        Write-Error "Для удаленного деплоя необходимо указать WINSRV_USER и WINSRV_PASS (через параметры или переменные окружения)."
+        exit 1
+    }
+    $securePass = ConvertTo-SecureString $Pass -AsPlainText -Force
+    $cred = New-Object System.Management.Automation.PSCredential ($User, $securePass)
 
-Write-Host "[4/5] Запуск сервера на $WinSrv (фоново)..."
-$startScript = "Start-Process -FilePath '$remotePath\impulse-server.exe' -WorkingDirectory '$remotePath' -WindowStyle Hidden"
-Invoke-Command -ComputerName $WinSrv -Credential $cred -ScriptBlock { param($s) iex $s } -ArgumentList $startScript
+    $remotePath = if ($TargetDir) { $TargetDir } else { "\\$RemoteHost\C$\Users\$User\Desktop\ImpulseServer" }
+    
+    # Остановка старого процесса
+    Write-Host " Остановка старого процесса impulse-server на $RemoteHost..."
+    $stopScript = "Stop-Process -Name impulse-server -Force -ErrorAction SilentlyContinue"
+    Invoke-Command -ComputerName $RemoteHost -Credential $cred -ScriptBlock { param($s) iex $s } -ArgumentList $stopScript
 
-Write-Host "[5/5] Health-check: порт $Port..."
-Start-Sleep -Seconds 3
-$ok = Test-NetConnection -ComputerName $WinSrv -Port $Port -InformationLevel Quiet
-if ($ok) { Write-Host "OK: сервер отвечает на $WinSrv:$Port" }
-else    { Write-Warning "Сервер не отвечает на порту $Port — проверь логи на 1.100" }
+    # Копирование бинаря
+    Write-Host " Копирование бинаря на $remotePath..."
+    if (!(Test-Path $remotePath)) {
+        New-Item -ItemType Directory -Force -Path $remotePath | Out-Null
+    }
+    Copy-Item $BinaryPath -Destination "$remotePath\impulse-server.exe" -Force
 
-Write-Host "Деплой завершён."
+    # Копирование config.toml если есть локально и отсутствует удаленно
+    $localCfg = Join-Path $ServerDir "config.toml"
+    if (Test-Path $localCfg) {
+        Copy-Item $localCfg -Destination "$remotePath\config.toml" -Force
+    }
+
+    # Запуск процесса
+    Write-Host " Запуск сервера на $RemoteHost..."
+    $startScript = "Start-Process -FilePath '$remotePath\impulse-server.exe' -WorkingDirectory '$remotePath' -WindowStyle Hidden"
+    Invoke-Command -ComputerName $RemoteHost -Credential $cred -ScriptBlock { param($s) iex $s } -ArgumentList $startScript
+
+    # Health-check
+    Start-Sleep -Seconds 3
+    $ok = Test-NetConnection -ComputerName $RemoteHost -Port $Port -InformationLevel Quiet
+    if ($ok) {
+        Write-Host " OK: сервер отвечает на $RemoteHost:$Port" -ForegroundColor Green
+    } else {
+        Write-Warning " Сервер не отвечает на порту $Port — проверьте логи на $RemoteHost"
+    }
+} elseif ($TargetDir -and $TargetDir.Trim() -ne "") {
+    Write-Host "[3/4] Локальное копирование бинаря в целевую директорию: $TargetDir..." -ForegroundColor Yellow
+    if (!(Test-Path $TargetDir)) {
+        New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
+    }
+    Copy-Item -Path $BinaryPath -Destination $TargetDir -Force
+    Write-Host " Файл скопирован в $TargetDir" -ForegroundColor Green
+
+    # Проверка конфигурации
+    Write-Host "[4/4] Проверка окружения сервера..." -ForegroundColor Yellow
+    $ConfigPath = Join-Path $TargetDir "config.toml"
+    if (Test-Path $ConfigPath) {
+        Write-Host " Конфигурационный файл $ConfigPath обнаружен." -ForegroundColor Green
+    } else {
+        Write-Host " Внимание: config.toml не найден в $TargetDir. Создайте его через 'impulse-server --init' или скопируйте вручную." -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "[3/4] Целевая папка не указана. Бинарь готов в $BinaryPath" -ForegroundColor Cyan
+    Write-Host "[4/4] Проверка локального config.toml..." -ForegroundColor Yellow
+    $ConfigPath = Join-Path $ServerDir "config.toml"
+    if (Test-Path $ConfigPath) {
+        Write-Host " Конфигурационный файл $ConfigPath обнаружен." -ForegroundColor Green
+    } else {
+        Write-Host " Внимание: config.toml не найден. Создайте его через 'impulse-server --init'." -ForegroundColor Yellow
+    }
+}
+
+Write-Host ""
+Write-Host " Деплой завершён успешно!" -ForegroundColor Green
