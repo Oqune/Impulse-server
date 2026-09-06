@@ -1,28 +1,30 @@
 # AGENTS.md — Impulse Server (Rust)
 
-Дополнение к корневому `../AGENTS.md`. Специфика server-части.
+Дополнение к корневому `../AGENTS.md` и `../AI_MANIFESTO.md`. Специфика серверного компонента.
 
-## Стек
-- Rust (edition 2024, MSRV 1.85), `cargo`, `tokio`, `wtransport` (WebTransport/QUIC).
-- Точка входа: `src/main.rs`. Логика релея: `src/relay/{mod,session,auth,housekeeping,stats}.rs`.
-- Конфиг: `src/config/{mod,cli,file}.rs` + `config.toml.example`.
-- Crypto: `src/crypto/mod.rs` (Argon2id, сертификаты).
+## Стек и архитектура
+- **Язык & компилятор:** Rust (edition 2024, MSRV 1.85), `tokio`, `wtransport` (WebTransport/QUIC, порт 4433).
+- **Точка входа:** `src/main.rs`.
+- **Ядро релея:** `src/relay/{mod,session,auth,housekeeping,stats,users}.rs`.
+- **Протокол и фрейминг:** `src/protocol/{mod,framing,limits}.rs` (опкоды `0x01`–`0x0C`).
+- **Криптография:** `src/crypto/mod.rs` (Argon2id OWASP: $m=47104, t=3, p=1$, TLS/QUIC самоподписанные сертификаты с ротацией).
+- **Хранилище:** `src/storage/mod.rs` (in-memory ring-buffer с ограничением по емкости и TTL 24ч).
 
-## Команды
-- Сборка: `cargo build` (dev) / `cargo build --release`
-- Тесты: `cargo test`
-- Линт: `cargo clippy -- -D warnings`
-- Запуск: `impulse-server --init` (мастер пароля) или `--config <path>`
+## Инженерные правила для ИИ-агента
+1. **Идиоматичный Rust:**
+   - Никаких скрытых `.unwrap()` или `.expect()` в сетевых циклах сессий — используем `Result`, типизированные ошибки и корректный `tracing::error!`.
+   - В async-контексте — строго `tokio::sync::Mutex`, никакой блокировки тредов через `std::sync::Mutex`.
+2. **Нулевое доверие к трафику:**
+   - Сервер является `Opaque Relay`. Запрещено предпринимать любые попытки десериализовать полезную нагрузку пакетов `0x05 Data` или `0x0C KeyExchange`.
+   - Сервер лишь верифицирует фрейминг, валидирует размеры (`MAX_PAYLOAD_BYTES`), управляет сессиями и штампует метаданные происхождения.
+3. **Логирование и приватность:**
+   - Запрещен вывод сырых auth-пакетов или паролей. Логируются только размеры и идентификаторы сессий.
+   - Уровни логирования управляются через `RUST_LOG`.
 
-## Правила
-- **Асинхронность:** в async-контексте — только `tokio::sync::Mutex`,
-  НЕ `std::sync::Mutex` (исправлено в аудите).
-- **Паники:** сессионные таски — оборачивать в `tracing::error!`, не глотать молча.
-- **Логи:** не hex-dump сырые auth-пакеты; уровни через `RUST_LOG`.
-- **Argon2id:** параметры OWASP (m=47104, t=3, p=1). Сервер шлёт свои параметры
-  в `AuthChallenge` (опкод 0x0B) — клиент обязан их использовать.
-- **Wire-протокол:** опкоды `0x01`–`0x0C`. Любое изменение — только с client + SPEC.
-
-## Тесты (покрыть, из аудита)
-- Обработка сессий, rate-limiter, ротация сертификатов, lifecycle storage.
-- Интеграционные с реальным WebTransport — пока нет (TODO).
+## Test-Gate (Обязательно перед коммитом)
+```powershell
+cargo build
+cargo test
+cargo clippy -- -D warnings
+```
+Все тесты обязаны завершаться успешно без предупреждений clippy.
