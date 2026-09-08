@@ -17,7 +17,7 @@ updated: 2026-09-06
 # Impulse — Post-Quantum E2EE LAN Messenger
 
 > **О проекте:** Децентрализованный сквозно-шифрованный LAN-мессенджер на базе протокола WebTransport (QUIC) с аппаратной устойчивостью к квантовым компьютерам.  
-> **Инженерный регламент:** Разработка ведётся в соответствии с [[AI_MANIFESTO|Манифестом AI-Assisted Engineering]] по строгой методологии **Spec-First** и **Test-Gated**.
+> **Инженерный регламент и видение:** Разработка ведётся в соответствии с [[AI_MANIFESTO|Манифестом AI-Assisted Engineering]] и [[docs/VISION|Документом видения (Vision & Roadmap)]] по строгой методологии **Spec-First** и **Test-Gated**.
 
 ---
 
@@ -95,6 +95,7 @@ D:\Data\Projects\ImpulseProject\
 ├── AI_MANIFESTO.md            # Манифест инженерной прозрачности разработки
 ├── PROJECT.md                 # Этот сводный файл проекта (Obsidian Vault)
 ├── docs/
+│   ├── VISION.md              # Документ видения, стандарты UI и Roadmap
 │   ├── policies/              # Политики безопасности, релизов и деплоя
 │   ├── specs/                 # Спецификации функционала (Spec-First)
 │   └── audit/                 # Отчёты аудита безопасности и архитектуры

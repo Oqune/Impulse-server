@@ -5,7 +5,7 @@
 //! the session closed. This standalone module keeps the codec free of a
 //! dependency on the relay.
 
-use crate::protocol::limits::MAX_PACKET_LEN;
+use crate::protocol::limits::{MAX_PACKET_LEN, MAX_PAYLOAD_BYTES};
 
 /// Result of [`try_read_packet`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +74,7 @@ pub fn try_read_packet(buf: &[u8]) -> TryReadResult {
         }
         _ => return TryReadResult::UnknownOpcode,
     };
-    if len > MAX_PACKET_LEN {
+    if len > MAX_PAYLOAD_BYTES {
         return TryReadResult::OversizedPayload;
     }
     TryReadResult::Packet(1 + 4 + len)

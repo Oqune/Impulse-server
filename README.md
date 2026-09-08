@@ -48,7 +48,7 @@ Key design points:
 
 ```bash
 cargo build --release
-./target/release/Impulse-server
+./target/release/impulse-server
 ```
 
 On first launch (no `config.toml`, no `--password-hash`) the server asks for a
@@ -56,7 +56,7 @@ client password interactively, writes a minimal `config.toml`, and starts. For
 explicit setup:
 
 ```bash
-./target/release/Impulse-server --init
+./target/release/impulse-server --init
 ```
 
 `--init` prompts for the password and optionally the bind address, cert
@@ -65,7 +65,7 @@ Headless environments (systemd, Docker) must configure the password hash first â
 the server refuses to start without one:
 
 ```bash
-./target/release/Impulse-server --hash-password yourpassword
+./target/release/impulse-server --hash-password yourpassword
 ```
 
 CLI flags always override the config file; `--license` prints the MIT license.

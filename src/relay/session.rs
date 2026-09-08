@@ -427,11 +427,10 @@ impl RelayServer {
                                     TryReadResult::UnknownOpcode => {
                                         let bad = buf[0];
                                         warn!(
-                                            "[READER] Session {} UNKNOWN BYTE 0x{:02x} at buffer start — skipping 1 byte (buf={} bytes remaining)",
-                                            session_key, bad, buf.len()
+                                            "[READER] Session {} UNKNOWN BYTE 0x{:02x} at buffer start — closing session (fail-closed)",
+                                            session_key, bad
                                         );
-                                        buf.remove(0);
-                                        this.stats.buffered_bytes.fetch_sub(1, Ordering::Relaxed);
+                                        return;
                                     }
                                     TryReadResult::OversizedPayload => {
                                         warn!(

@@ -1,6 +1,10 @@
 # AGENTS.md — Impulse Server (Rust)
 
-Дополнение к `PROJECT.md` и `AI_MANIFESTO.md`. Специфика серверного компонента.
+Дополнение к `PROJECT.md`, `AI_MANIFESTO.md` и канону видения `docs/VISION.md`. Специфика серверного компонента.
+
+## Дизайн-код и философия TUI
+- **Эстетика:** Терминальный Unix-Rice (r/unixporn, ratatui, ANSI QR, живой мониторинг сессий и трафика).
+- **Легкость:** Полная автономность бинарника, нулевое потребление в простое, строгая изоляция данных (Zero-Knowledge).
 
 ## Стек и архитектура
 - **Язык & компилятор:** Rust (edition 2024, MSRV 1.85), `tokio`, `wtransport` (WebTransport/QUIC, порт 4433).

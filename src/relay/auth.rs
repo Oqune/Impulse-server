@@ -179,6 +179,10 @@ pub(crate) async fn process_packet(
 
             if ok {
                 session.authenticated = true;
+                if let Some(mut meta) = relay.sessions.get_mut(&session_key) {
+                    meta.authenticated = true;
+                }
+                relay.tui.set_sessions(relay.session_rows());
             }
             if !ok {
                 // Slow down brute-force attempts

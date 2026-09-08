@@ -50,7 +50,7 @@ Impulse — это relay-сервер для end-to-end-encrypted мессенд
 
 ```bash
 cargo build --release
-./target/release/Impulse-server
+./target/release/impulse-server
 ```
 
 При первом запуске (нет `config.toml`, нет `--password-hash`) сервер
@@ -58,7 +58,7 @@ cargo build --release
 и стартует. Для явной настройки:
 
 ```bash
-./target/release/Impulse-server --init
+./target/release/impulse-server --init
 ```
 
 `--init` запрашивает пароль и, опционально, адрес привязки, каталог
@@ -67,7 +67,7 @@ cargo build --release
 настроить заранее — сервер отказывается стартовать без него:
 
 ```bash
-./target/release/Impulse-server --hash-password yourpassword
+./target/release/impulse-server --hash-password yourpassword
 ```
 
 CLI-флаги всегда переопределяют конфиг; `--license` выводит текст лицензии MIT.
