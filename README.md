@@ -1,6 +1,6 @@
 <div align="center">
 
-[🇺🇸 **English**](README.md) | [🇷🇺 Русский](README.ru.md)
+[**English**](README.md) | [Русский](README.ru.md)
 
 ![logo](logo.png)
 
@@ -195,13 +195,13 @@ builds release binaries for the targets below.
 
 | Platform | Target triple | Build | Runtime-tested | Notes |
 |----------|---------------|-------|----------------|-------|
-| Linux (x86-64) | `x86_64-unknown-linux-gnu` | ✅ CI build | ✅ CI `cargo test` | Recommended for servers |
-| Linux (ARM64) | `aarch64-unknown-linux-gnu` | ✅ CI build (cross) | ⚠️ build only | AWS Graviton, Pi 4 (64-bit); expected stable, not runtime-tested in CI |
-| Linux (ARMv7) | `armv7-unknown-linux-gnueabihf` | ✅ CI build (cross) | ⚠️ build only | Pi 2/3, 32-bit OS; expected stable |
-| Linux (RISC-V 64) | `riscv64gc-unknown-linux-gnu` | ✅ CI build (cross) | ⚠️ build only | VisionFive 2; expected stable |
-| Windows (x86-64) | `x86_64-pc-windows-msvc` | ✅ CI build | ⚠️ build only | Console app, binds UDP/QUIC directly |
-| Windows (ARM64) | `aarch64-pc-windows-msvc` | ✅ CI build | ⚠️ build only | Windows on ARM |
-| FreeBSD / BSDs | `x86_64-unknown-freebsd` | ❌ not in CI | ⚠️ manual only | `aws-lc-sys` has no FreeBSD cross sysroot; native toolchain required |
+| Linux (x86-64) | `x86_64-unknown-linux-gnu` | CI build | CI `cargo test` | Recommended for servers |
+| Linux (ARM64) | `aarch64-unknown-linux-gnu` | CI build (cross) | Build only | AWS Graviton, Pi 4 (64-bit); expected stable, not runtime-tested in CI |
+| Linux (ARMv7) | `armv7-unknown-linux-gnueabihf` | CI build (cross) | Build only | Pi 2/3, 32-bit OS; expected stable |
+| Linux (RISC-V 64) | `riscv64gc-unknown-linux-gnu` | CI build (cross) | Build only | VisionFive 2; expected stable |
+| Windows (x86-64) | `x86_64-pc-windows-msvc` | CI build | Build only | Console app, binds UDP/QUIC directly |
+| Windows (ARM64) | `aarch64-pc-windows-msvc` | CI build | Build only | Windows on ARM |
+| FreeBSD / BSDs | `x86_64-unknown-freebsd` | Not in CI | Manual only | `aws-lc-sys` has no FreeBSD cross sysroot; native toolchain required |
 
 **Legend:** "CI build" = compiled by the release pipeline; "runtime-tested" =
 `cargo test` actually executed on that target. Only `x86_64-unknown-linux-gnu`

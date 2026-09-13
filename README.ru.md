@@ -1,6 +1,6 @@
 <div align="center">
 
-[🇺🇸 **English**](README.md) | [🇷🇺 **Русский**](README.ru.md)
+[English](README.md) | [**Русский**](README.ru.md)
 
 ![logo](logo.png)
 
@@ -198,13 +198,13 @@ CI собирает релизные бинарники для целей ниж
 
 | Платформа | Target triple | Сборка | Runtime-тест | Примечания |
 |-----------|---------------|--------|--------------|------------|
-| Linux (x86-64) | `x86_64-unknown-linux-gnu` | ✅ CI сборка | ✅ CI `cargo test` | Рекомендуется для серверов |
-| Linux (ARM64) | `aarch64-unknown-linux-gnu` | ✅ CI сборка (cross) | ⚠️ только сборка | AWS Graviton, Pi 4 (64-bit); ожидается стабильным, не тестирован в CI |
-| Linux (ARMv7) | `armv7-unknown-linux-gnueabihf` | ✅ CI сборка (cross) | ⚠️ только сборка | Pi 2/3, 32-bit OS; ожидается стабильным |
-| Linux (RISC-V 64) | `riscv64gc-unknown-linux-gnu` | ✅ CI сборка (cross) | ⚠️ только сборка | VisionFive 2; ожидается стабильным |
-| Windows (x86-64) | `x86_64-pc-windows-msvc` | ✅ CI сборка | ⚠️ только сборка | Консольное приложение, бинд на UDP/QUIC |
-| Windows (ARM64) | `aarch64-pc-windows-msvc` | ✅ CI сборка | ⚠️ только сборка | Устройства на Windows on ARM |
-| FreeBSD / BSD | `x86_64-unknown-freebsd` | ❌ нет в CI | ⚠️ вручную | У `aws-lc-sys` нет FreeBSD sysroot для кросса; нужен нативный тулчейн |
+| Linux (x86-64) | `x86_64-unknown-linux-gnu` | CI сборка | CI `cargo test` | Рекомендуется для серверов |
+| Linux (ARM64) | `aarch64-unknown-linux-gnu` | CI сборка (cross) | Только сборка | AWS Graviton, Pi 4 (64-bit); ожидается стабильным, не тестирован в CI |
+| Linux (ARMv7) | `armv7-unknown-linux-gnueabihf` | CI сборка (cross) | Только сборка | Pi 2/3, 32-bit OS; ожидается стабильным |
+| Linux (RISC-V 64) | `riscv64gc-unknown-linux-gnu` | CI сборка (cross) | Только сборка | VisionFive 2; ожидается стабильным |
+| Windows (x86-64) | `x86_64-pc-windows-msvc` | CI сборка | Только сборка | Консольное приложение, бинд на UDP/QUIC |
+| Windows (ARM64) | `aarch64-pc-windows-msvc` | CI сборка | Только сборка | Устройства на Windows on ARM |
+| FreeBSD / BSD | `x86_64-unknown-freebsd` | Нет в CI | Вручную | У `aws-lc-sys` нет FreeBSD sysroot для кросса; нужен нативный тулчейн |
 
 **Легенда:** «CI сборка» = скомпилировано пайплайном; «runtime-тест» = `cargo test`
 реально выполнен на этой цели. Только `x86_64-unknown-linux-gnu` гоняет тесты в
