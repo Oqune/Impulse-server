@@ -10,8 +10,8 @@ tags:
   - webtransport
   - quic
 status: production-ready-hardening
-version: "Client v2.9.1 / Server v2.7.4"
-updated: 2026-09-06
+version: "Client v3.0.0 / Server v3.0.0 (Protocol v3)"
+updated: 2026-09-13
 ---
 
 # Impulse — Post-Quantum E2EE LAN Messenger
@@ -85,6 +85,12 @@ graph TD
 | `0x33` | Data | **Sync** | Client $\rightarrow$ Server | `[u64 last_seen_server_id]` |
 | `0x34` | Data | **SyncResponse** | Server $\rightarrow$ Client | `[u32 count] { [u64 id][u64 server_ts][u32 len][payload_bytes] }*` |
 
+### Историческая эволюция версий и совместимости
+- **v0.x.y (Legacy WS):** Начальный прототип на базе незашифрованных WebSocket (`ws://`).
+- **v1.x.y (Legacy WSS):** Переписывание транспорта на WebSocket Secure (`wss://`) с шифрованием канала TLS.
+- **v2.x.y (Transitional WebTransport):** Переход на WebTransport (QUIC / UDP 4433). Активные эксперименты с E2EE и постквантовыми примитивами ML-KEM/ML-DSA. Из-за динамичной эволюции архитектуры совместимость между промежуточными сборками v2.x не всегда была взаимной (клиент развился до v2.9.x, сервер — до v2.7.x).
+- **v3.0.0+ (Protocol-Locked SemVer Era):** Старт новой эры со строгой сетевой совместимостью. Первая цифра (3) фиксирует неизменный бинарный Wire-протокол. Любой клиент `v3.x` на 100% совместим с любым сервером `v3.y`.
+
 ---
 
 ## 4. Структура репозиториев
@@ -127,13 +133,17 @@ D:\Data\Projects\ImpulseProject\
 
 | ID | Уязвимость / Узкое место | Статус | Реализация |
 | :---: | :--- | :---: | :--- |
-| **C1** | Подмена открытых ключей (Key Substitution / MITM) | **ЗАКРЫТО** | Добавлена аттестация ML-DSA-65 в пакете `0x31 KeyExchangeKemDsa` с запретом слепого перезаписывания |
-| **C2** | Открытый текст в outbox | **ЗАКРЫТО** | Outbox хранит только зашифрованные фреймы; TTL на сервере сокращен до 24ч |
-| **C3** | Передача открытого пароля в `OP_AUTH` | **ЗАКРЫТО** | Переход на HMAC-SHA-256 (`0x12 Auth`) по вызову от сервера `0x11 AuthChallenge` |
-| **C4** | Повтор сообщений (Replay Attacks) | **ЗАКРЫТО** | Добавлен LRU-кэш `seenNonces` в `ChatController.kt` |
-| **ANR** | Блокировки UI потока `runBlocking` при отключении | **ЗАКРЫТО** | Переход на неблокирующие корутины `Dispatchers.IO + NonCancellable` |
+| **C1** | Подмена открытых ключей (Key Substitution / MITM) | **ЗАКРЫТО** | Добавлена аттестация ML-DSA-65 в пакете `0x31 KeyExchangeKemDsa`; поиск по `dsaPublicKey` исключает обход TOFU |
+| **C2** | Открытый текст в outbox | **ЗАКРЫТО** | Outbox изолирован по `serverId` и хранит только зашифрованные фреймы; TTL на сервере сокращен до 24ч |
+| **C3** | Передача открытого пароля в `OP_AUTH` | **ЗАКРЫТО** | Переход на HMAC-SHA-256 (`0x12 Auth`) по вызову от сервера `0x11 AuthChallenge` с очисткой ключа в памяти |
+| **C4** | Повтор сообщений (Replay Attacks) | **ЗАКРЫТО** | Добавлен LRU-кэш `seenNonces` в `ChatController.kt` и верификация skew времени (72ч) |
+| **ANR** | Блокировки UI потока `runBlocking` при отключении | **ЗАКРЫТО** | Переход на неблокирующие корутины `Dispatchers.IO + NonCancellable`, дешифрование на `Dispatchers.Default` |
 | **ID** | Коллизии временных ID сообщений | **ЗАКРЫТО** | Внедрен монотонный потокобезопасный счётчик `AtomicLong` |
 | **N2** | Рассинхрон лимита полезной нагрузки | **ЗАКРЫТО** | Строго зафиксирован `MAX_PAYLOAD_BYTES = 1_000_000` байт в обоих проектах |
+| **PERF-DB** | Замедление запросов истории при росте БД | **ЗАКРЫТО** | Добавлены индексы `(server_id, conversation_id)` и `timestamp` (Room v5) |
+| **SEC-BCK** | Использование PBKDF2 в резервных копиях ключей | **ЗАКРЫТО** | Переход на Argon2id v4 ($m=47104, t=3, p=1$) в `SecureKeyManager.kt` |
+| **NET-LAN** | Сбои в изолированных офлайн-сетях LAN | **ЗАКРЫТО** | Удалено требование валидированного Интернет-подключения в `NetworkMonitor.kt` |
+| **BUILD-CI**| Сбои KAPT, 16 KB native alignment и CI подписи APK | **ЗАКРЫТО** | Стабилизация KAPT, автоматический 16KB ELF-пайплайн, гибкая сборка подписанных/неподписанных APK в GitHub Actions |
 
 ---
 

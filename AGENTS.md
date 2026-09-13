@@ -32,3 +32,10 @@ cargo test
 cargo clippy -- -D warnings
 ```
 Все тесты обязаны завершаться успешно без предупреждений clippy.
+
+## Релизы и версионирование
+- **Protocol-Locked SemVer:** `v<ProtocolMajor>.<ComponentMinor>.<Patch>` (текущая линейка: Server `v3.0.x`, Protocol v3).
+- Теги: строго `vX.Y.Z` (например, `v3.0.0`).
+- Заголовки релизов на GitHub: `Impulse Server vX.Y.Z`.
+- Патч-ноуты: строго без эмодзи, с обязательной таблицей архитектур и прямых ссылок на бинарники/пакеты.
+
