@@ -1,22 +1,38 @@
 <div align="center">
 
-[**English**](README.md) | [Русский](README.ru.md)
+# Impulse Server
 
-![logo](logo.png)
+**High-Performance Ephemeral WebTransport (QUIC) Relay for Post-Quantum E2EE Messaging**
 
-[![Rust](https://img.shields.io/badge/Rust-1.85%2B-darkblue?logo=rust)](https://www.rust-lang.org)
-[![WebTransport](https://img.shields.io/badge/Transport-WebTransport%20%2F%20QUIC-green)](https://w3c.github.io/webtransport/)
+[English](README.md) | [Русский](README.ru.md)
+
+[![Rust](https://img.shields.io/badge/Rust-1.85%2B-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Transport](https://img.shields.io/badge/Transport-WebTransport%20%2F%20QUIC-00E5FF)](https://w3c.github.io/webtransport/)
+[![Security](https://img.shields.io/badge/Security-Zero--Knowledge%20Relay-22c55e)](#security)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/Oqune/Impulse-server/actions/workflows/server-build.yml/badge.svg)](https://github.com/Oqune/Impulse-server/actions/workflows/server-build.yml)
-[![Release](https://img.shields.io/github/v/release/Oqune/Impulse-server?label=latest)](https://github.com/Oqune/Impulse-server/releases)
-
-Secure, **ephemeral** messenger server over **WebTransport (QUIC)** with
-**TOFU** trust-on-first-use and password authentication.
-
-> **Client:** [Oqune/Impulse-client](https://github.com/Oqune/Impulse-client) —
-> Android post-quantum E2EE chat client for this server.
+[![Release](https://img.shields.io/github/v/release/Oqune/Impulse-server?label=latest&color=7928CA)](https://github.com/Oqune/Impulse-server/releases)
 
 </div>
+
+> **Zero-Knowledge Relay:** Secure, ephemeral relay server engineered in portable Rust (edition 2024). The server acts as a blind broker: it never inspects, decrypts, or persists plaintext. All payloads are encapsulated on client endpoints and buffered in RAM with an automatic 72-hour TTL.
+>
+> Android Client: [Oqune/Impulse-client](https://github.com/Oqune/Impulse-client).
+
+---
+
+### Core Specifications
+
+| Parameter | Implementation | Details |
+| :--- | :--- | :--- |
+| **Networking** | `wtransport` 0.7 (QUIC / TLS 1.3) | Single UDP port (default 4433), connection migration |
+| **Relay Security** | Blind / Opaque Relay | Zero plaintext visibility, per-recipient KEM blobs |
+| **Authentication** | Argon2id + HMAC-SHA-256 | OWASP parameters ($m=47104, t=3, p=1$), constant-time verify |
+| **TLS Lifecycle** | ECDSA P-256 (Self-Signed) | 14-day lifetime, automatic live rotation with 2-day overlap |
+| **Memory Storage** | In-RAM Ring Buffer | Monotonic 64-bit sequence IDs, 72h TTL, 1 MB per payload |
+| **Management** | Three-Column TUI (`ratatui`) | Telemetry dashboard, ASCII TOFU QR, live session monitor |
+
+---
 
 ## Overview
 

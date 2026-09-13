@@ -1,22 +1,38 @@
 <div align="center">
 
+# Impulse Server
+
+**Высокопроизводительный эфемерный WebTransport (QUIC) релей для постквантового E2EE мессенджера**
+
 [English](README.md) | [**Русский**](README.ru.md)
 
-![logo](logo.png)
-
-[![Rust](https://img.shields.io/badge/Rust-1.85%2B-darkblue?logo=rust)](https://www.rust-lang.org)
-[![WebTransport](https://img.shields.io/badge/Transport-WebTransport%20%2F%20QUIC-green)](https://w3c.github.io/webtransport/)
+[![Rust](https://img.shields.io/badge/Rust-1.85%2B-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Transport](https://img.shields.io/badge/Transport-WebTransport%20%2F%20QUIC-00E5FF)](https://w3c.github.io/webtransport/)
+[![Security](https://img.shields.io/badge/Security-Zero--Knowledge%20Relay-22c55e)](#безопасность)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/Oqune/Impulse-server/actions/workflows/server-build.yml/badge.svg)](https://github.com/Oqune/Impulse-server/actions/workflows/server-build.yml)
-[![Release](https://img.shields.io/github/v/release/Oqune/Impulse-server?label=latest)](https://github.com/Oqune/Impulse-server/releases)
-
-Сервер безопасного **эфемерного** мессенджера на **WebTransport (QUIC)** с
-**TOFU** (trust-on-first-use) и парольной аутентификацией.
-
-> **Клиент:** [Oqune/Impulse-client](https://github.com/Oqune/Impulse-client) —
-> Android-клиент с постквантовым E2EE для этого сервера.
+[![Release](https://img.shields.io/github/v/release/Oqune/Impulse-server?label=latest&color=7928CA)](https://github.com/Oqune/Impulse-server/releases)
 
 </div>
+
+> **Непрозрачный Zero-Knowledge релей:** Безопасный, эфемерный relay-сервер на переносимом Rust (edition 2024). Сервер работает вслепую: он никогда не анализирует, не расшифровывает и не сохраняет открытый текст. Все сообщения зашифрованы на конечных клиентах и буферизуются в оперативной памяти с автоудалением по TTL 72 ч.
+>
+> Android-клиент: [Oqune/Impulse-client](https://github.com/Oqune/Impulse-client).
+
+---
+
+### Архитектурные спецификации
+
+| Параметр | Реализация | Описание |
+| :--- | :--- | :--- |
+| **Сетевой стек** | `wtransport` 0.7 (QUIC / TLS 1.3) | Единый UDP-порт (по умолчанию 4433), миграция соединений |
+| **Приватность релея** | Opaque Relay (Слепой релей) | Нулевая видимость открытого текста, per-recipient KEM блобы |
+| **Аутентификация** | Argon2id + HMAC-SHA-256 | OWASP параметры ($m=47104, t=3, p=1$), проверка в constant time |
+| **TLS-сертификаты** | ECDSA P-256 (самоподписанные) | Срок действия 14 дней, авто-ротация на лету с перекрытием 2 дня |
+| **Хранение сообщений**| Кольцевой буфер в RAM | Монотонные 64-битные sequence ID, TTL 72 ч, лимит 1 МБ на фрейм |
+| **Управление** | Трёхколоночный TUI (`ratatui`) | Дашборд телеметрии, ASCII QR для TOFU, монитор сессий |
+
+---
 
 ## Обзор
 
