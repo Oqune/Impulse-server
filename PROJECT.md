@@ -10,14 +10,14 @@ tags:
   - webtransport
   - quic
 status: production-ready-hardening
-version: "Client v3.0.0 / Server v3.0.0 (Protocol v3)"
-updated: 2026-09-13
+version: "Client v3.1.2 / Server v3.0.0 (Protocol v3)"
+updated: 2026-09-14
 ---
 
 # Impulse — Post-Quantum E2EE LAN Messenger
 
 > **О проекте:** Децентрализованный сквозно-шифрованный LAN-мессенджер на базе протокола WebTransport (QUIC) с аппаратной устойчивостью к квантовым компьютерам.  
-> **Инженерный регламент и видение:** Разработка ведётся в соответствии с [[AI_MANIFESTO|Манифестом AI-Assisted Engineering]] и [[docs/VISION|Документом видения (Vision & Roadmap)]] по строгой методологии **Spec-First** и **Test-Gated**.
+> **Инженерный регламент и видение:** Разработка ведётся в соответствии с [[AI_MANIFESTO|Манифестом AI-Assisted Engineering]], [[docs/VISION|Документом видения (Vision & Roadmap)]] и [[docs/SYSTEM_REGISTRY|Единым реестром системных параметров]] по строгой методологии **Spec-First** и **Test-Gated**.
 
 ---
 
@@ -42,7 +42,7 @@ graph TD
     subgraph Server["Relay Host (Rust 2024 / Tokio)"]
         WTServer[wtransport QUIC Listener] --> Relay[Relay Core]
         Relay --> Auth[Auth & Argon2id Gate\nOWASP m=47104, t=3, p=1]
-        Relay --> Store[(In-Memory Ring Buffer\nTTL 24h, Opaque Ciphertext)]
+        Relay --> Store[(In-Memory Ring Buffer\nTTL 72h, Opaque Ciphertext)]
         Relay --> Registry[User Session Registry]
     end
 ```
@@ -134,9 +134,9 @@ D:\Data\Projects\ImpulseProject\
 | ID | Уязвимость / Узкое место | Статус | Реализация |
 | :---: | :--- | :---: | :--- |
 | **C1** | Подмена открытых ключей (Key Substitution / MITM) | **ЗАКРЫТО** | Добавлена аттестация ML-DSA-65 в пакете `0x31 KeyExchangeKemDsa`; поиск по `dsaPublicKey` исключает обход TOFU |
-| **C2** | Открытый текст в outbox | **ЗАКРЫТО** | Outbox изолирован по `serverId` и хранит только зашифрованные фреймы; TTL на сервере сокращен до 24ч |
+| **C2** | Открытый текст в outbox | **ЗАКРЫТО** | Outbox изолирован по `serverId` и хранит только зашифрованные фреймы; TTL унифицирован до 72ч (с нахлестом ротации сертификатов 4 дня) |
 | **C3** | Передача открытого пароля в `OP_AUTH` | **ЗАКРЫТО** | Переход на HMAC-SHA-256 (`0x12 Auth`) по вызову от сервера `0x11 AuthChallenge` с очисткой ключа в памяти |
-| **C4** | Повтор сообщений (Replay Attacks) | **ЗАКРЫТО** | Добавлен LRU-кэш `seenNonces` в `ChatController.kt` и верификация skew времени (72ч) |
+| **C4** | Повтор сообщений (Replay Attacks) | **ЗАКРЫТО** | Добавлен LRU-кэш `seenNonces` в `ChatController.kt` и верификация skew времени (4 дня / 96ч) |
 | **ANR** | Блокировки UI потока `runBlocking` при отключении | **ЗАКРЫТО** | Переход на неблокирующие корутины `Dispatchers.IO + NonCancellable`, дешифрование на `Dispatchers.Default` |
 | **ID** | Коллизии временных ID сообщений | **ЗАКРЫТО** | Внедрен монотонный потокобезопасный счётчик `AtomicLong` |
 | **N2** | Рассинхрон лимита полезной нагрузки | **ЗАКРЫТО** | Строго зафиксирован `MAX_PAYLOAD_BYTES = 1_000_000` байт в обоих проектах |

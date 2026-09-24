@@ -2,9 +2,9 @@
 //!
 //! Architecture overview:
 //! * `cert` — self-signed ECDSA P-256 certificate generation, 14-day TTL,
-//!   2-day overlap rotation, SHA-256 TOFU fingerprint.
+//!   4-day overlap rotation, SHA-256 TOFU fingerprint.
 //! * `storage` — ephemeral in-RAM message log with 72h TTL and sequence ids.
-//! * `protocol` — binary wire frames (opcodes 0x01–0x0C) over WebTransport;
+//! * `protocol` — binary wire frames (opcodes 0x11–0x34) over WebTransport;
 //!   framing and size limits live in `protocol::framing` / `protocol::limits`.
 //! * `crypto` — Argon2id password hashing + verification (auth chain).
 //! * `relay` — WebTransport endpoint, session handling, broadcast relay,

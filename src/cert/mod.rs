@@ -32,8 +32,9 @@ use wtransport::tls::rustls;
 pub const CERT_VALIDITY: Duration = Duration::from_secs(60 * 60 * 24 * 14); // 14 days
 
 /// Overlap window: a new certificate is generated this long before the old one
-/// expires, so both are valid simultaneously for `OVERLAP` time.
-pub const CERT_OVERLAP: Duration = Duration::from_secs(60 * 60 * 24 * 2); // 2 days
+/// expires, so both are valid simultaneously for `OVERLAP` time (4 days,
+/// ensuring full coverage over the 72h / 3-day message TTL window).
+pub const CERT_OVERLAP: Duration = Duration::from_secs(60 * 60 * 24 * 4); // 4 days
 
 /// When to start rotating relative to expiry (mirror of [`CERT_OVERLAP`]).
 const ROTATE_BEFORE_EXPIRY: Duration = CERT_OVERLAP;

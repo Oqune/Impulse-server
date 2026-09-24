@@ -28,7 +28,7 @@
 | **Networking** | `wtransport` 0.7 (QUIC / TLS 1.3) | Single UDP port (default 4433), connection migration |
 | **Relay Security** | Blind / Opaque Relay | Zero plaintext visibility, per-recipient KEM blobs |
 | **Authentication** | Argon2id + HMAC-SHA-256 | OWASP parameters ($m=47104, t=3, p=1$), constant-time verify |
-| **TLS Lifecycle** | ECDSA P-256 (Self-Signed) | 14-day lifetime, automatic live rotation with 2-day overlap |
+| **TLS Lifecycle** | ECDSA P-256 (Self-Signed) | 14-day lifetime, automatic live rotation with 4-day overlap |
 | **Memory Storage** | In-RAM Ring Buffer | Monotonic 64-bit sequence IDs, 72h TTL, 1 MB per payload |
 | **Management** | Three-Column TUI (`ratatui`) | Telemetry dashboard, ASCII TOFU QR, live session monitor |
 
@@ -49,7 +49,7 @@ Key design points:
 - **Auth:** `AuthChallenge` (0x11) with a 16-byte nonce + Argon2id salt + params → client
   HMAC-SHA-256 response (`Auth`, 0x12) → constant-time verification.
 - **TLS / Certificates:** self-signed **ECDSA P-256**, valid **14 days**, rotated
-  automatically with a **2-day overlap**. PEM persisted with `0600` (Unix) /
+  automatically with a **4-day overlap**. PEM persisted with `0600` (Unix) /
   restricted DACL (Windows).
 - **TOFU:** QR code with `impulse-cert:<sha256>`; clients pin
   `serverCertificateHashes`. Rotation is announced via `NewCertHash` (0x22).
@@ -267,7 +267,7 @@ limit before allocating, preventing CPU-DoS via inflated length prefixes.
 ## Security
 
 - Mandatory QUIC/TLS 1.3 transport (WebTransport).
-- Short-lived ECDSA P-256 certs (14 d) with automatic rotation (2 d overlap),
+- Short-lived ECDSA P-256 certs (14 d) with automatic rotation (4 d overlap),
   applied to the **live** TLS resolver without restart, announced via `NewCertHash`.
 - TOFU fingerprint pinning via QR code + `NewCertHash`.
 - Post-quantum hybrid TLS key exchange (X25519Kyber768) via `aws-lc-rs`.
