@@ -1,6 +1,6 @@
 [package]
 name = "impulse-server"
-version = "3.0.1"
+version = "3.1.0"
 edition = "2024"
 description = "Secure ephemeral messenger server over WebTransport (QUIC) with TOFU trust-on-first-use"
 license = "MIT"
@@ -21,6 +21,7 @@ path = "src/main.rs"
 [dependencies]
 # WebTransport (QUIC/HTTP3) transport
 wtransport = { version = "0.7", features = ["quinn"] }
+socket2 = "0.5"
 
 # TLS / certificate generation
 # aws-lc-rs enables hybrid PQ X25519Kyber768 key exchange for TLS 1.3.

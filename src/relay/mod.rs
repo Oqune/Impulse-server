@@ -137,8 +137,9 @@ impl RelayServer {
         };
         let session_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_SESSIONS));
 
+        let (socket, bound_addr) = crate::network::bind_dual_stack_udp(&config.address)?;
         let server_config = ServerConfig::builder()
-            .with_bind_address(config.address.parse()?)
+            .with_bind_socket(socket)
             .with_custom_tls(tls_config.clone())
             .keep_alive_interval(Some(Duration::from_secs(15)))
             .build();
@@ -193,9 +194,9 @@ impl RelayServer {
 
         // Publish static technical info for the TUI header block.
         let display_address = if config.address6.is_empty() {
-            config.address.clone()
+            bound_addr.to_string()
         } else {
-            format!("{}, {}", config.address, config.address6)
+            format!("{}, {}", bound_addr, config.address6)
         };
         tui.set_info(crate::ui::view::ServerInfo {
             address: display_address,
@@ -308,7 +309,7 @@ impl RelayServer {
 
                     // Per-IP rate limiting: reject if too many recent connections
                     // from the same address (within RATE_LIMIT_WINDOW).
-                    let remote_ip = connection.remote_address().ip();
+                    let remote_ip = connection.remote_address().ip().to_canonical();
                     if !self.check_rate_limit(remote_ip).await {
                         self.stats.rate_limited.fetch_add(1, Ordering::Relaxed);
                         connection.close(wtransport::VarInt::from(0u32), b"rate_limit");

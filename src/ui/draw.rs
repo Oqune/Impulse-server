@@ -21,10 +21,10 @@ use crate::ui::view::{CertView, LogRecord, ServerInfo, SessionRow, UserRow, Serv
 use crate::ui::view::{compute_scroll, fmt_duration, live_total_online};
 use crate::ui::{PanelMode, TuiState};
 
-/// Left column width (Server/QR/Cert) in the full layout.
-const LEFT_COL_WIDTH: u16 = 42;
+/// Left column width (Server/QR/Cert) in the full layout (sized for full IPv6 [IPv6]:port).
+const LEFT_COL_WIDTH: u16 = 45;
 /// Middle column width (Users + Sessions) in the three-column layout.
-const MIDDLE_COL_WIDTH: u16 = 44;
+const MIDDLE_COL_WIDTH: u16 = 48;
 /// Minimum width for the three-column layout (two-column below this).
 const THREE_COL_MIN_WIDTH: u16 = 125;
 /// Minimum width for the full (non-compact) layout.
@@ -464,7 +464,7 @@ fn draw_sessions(f: &mut ratatui::Frame, area: Rect, sessions: &[SessionRow]) {
         };
         lines.push(Line::from(vec![
             Span::styled(format!("{:4}  ", row.key), Style::default().fg(THEME.dim)),
-            Span::styled(format!("{:<16}", row.ip.to_string()), Style::default().fg(THEME.value)),
+            Span::styled(format!("{:<16}", row.ip.to_canonical().to_string()), Style::default().fg(THEME.value)),
             Span::raw("  "),
             auth,
             user_tag,

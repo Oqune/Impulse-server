@@ -4,13 +4,10 @@
 # CLI flags always override values here.
 
 [server]
-# Socket address the WebTransport (QUIC) endpoint binds to.
-# WebTransport standard port (4433). Client defaults to this port as well.
-# `--host` / `--port` flags override the corresponding parts of this value.
-address = "0.0.0.0:4433"
-
-# Optional IPv6 bind address, e.g. "[::]:4433". Empty (or unset) = disabled.
-# address6 = "[::]:4433"
+# Primary socket address the WebTransport (QUIC) endpoint binds to.
+# Default: "[::]:4433" (IPv4/IPv6 Dual-Stack). Falls back to 0.0.0.0:4433 if IPv6 is disabled.
+# `--host` / `--bind` / `--port` flags override this value.
+address = "[::]:4433"
 
 # Directory where the self-signed certificate + key are persisted (relative to exe).
 cert_dir = "cert_data"

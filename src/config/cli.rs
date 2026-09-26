@@ -8,7 +8,8 @@ use clap::Parser;
 pub struct CliArgs {
     #[arg(
         long,
-        help = "IPv4 bind address (overrides `server.address` in the config file)"
+        visible_alias = "bind",
+        help = "Bind address or host (default: [::]:4433, overrides `server.address` in config)"
     )]
     pub host: Option<String>,
 

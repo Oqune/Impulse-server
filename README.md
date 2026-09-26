@@ -25,7 +25,7 @@
 
 | Parameter | Implementation | Details |
 | :--- | :--- | :--- |
-| **Networking** | `wtransport` 0.7 (QUIC / TLS 1.3) | Single UDP port (default 4433), connection migration |
+| **Networking** | `wtransport` 0.7 (QUIC / TLS 1.3) | Single UDP port (default 4433), IPv4/IPv6 Dual-Stack (`[::]:4433`, fallback to `0.0.0.0:4433`), connection migration |
 | **Relay Security** | Blind / Opaque Relay | Zero plaintext visibility, per-recipient KEM blobs |
 | **Authentication** | Argon2id + HMAC-SHA-256 | OWASP parameters ($m=47104, t=3, p=1$), constant-time verify |
 | **TLS Lifecycle** | ECDSA P-256 (Self-Signed) | 14-day lifetime, automatic live rotation with 4-day overlap |
@@ -88,7 +88,7 @@ CLI flags always override the config file; `--license` prints the MIT license.
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--host` | | Bind host (overrides `server.address`) | from config / `0.0.0.0` |
+| `--bind`, `--host` | | Bind address or host (IPv4/IPv6 Dual-Stack `[::]:4433`, fallback to `0.0.0.0:4433`) | from config / `[::]:4433` |
 | `--port` | `-p` | WebTransport (QUIC) listen port | from config / `4433` |
 | `--cert-dir` | | Directory for the generated certificate/key | `cert_data` |
 | `--san` | | Extra SAN (DNS name or IP) for the self-signed cert (repeatable) | _none_ |

@@ -116,7 +116,7 @@ impl RelayServer {
         _permit: tokio::sync::OwnedSemaphorePermit,
         session_key: u64,
     ) {
-        let remote_ip = connection.remote_address().ip();
+        let remote_ip = connection.remote_address().ip().to_canonical();
 
         // Accept the bidirectional stream opened by the client. WebTransport uses
         // a client-initiated stream: the Android client calls

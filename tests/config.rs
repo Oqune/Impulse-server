@@ -185,3 +185,36 @@ fn config_file_loaded_reports_discovery() {
     let _ = std::fs::remove_file(&cfg_path);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn default_address_is_dual_stack_wildcard() {
+    let path = temp_config(
+        "default_ds",
+        &format!("[server]\npassword_hash = \"{TEST_HASH}\"\n"),
+    );
+    let cfg = load_config(&cli_with_config(Some(path.to_str().unwrap()))).unwrap();
+    assert_eq!(cfg.server.address, "[::]:4433");
+}
+
+#[test]
+fn bind_alias_supports_dual_stack_and_port() {
+    // Test --bind with bracketed IPv6 and explicit port
+    let c = CliArgs::parse_from(["impulse-server", "--bind", "[::]:9000", "--password-hash", TEST_HASH]);
+    let cfg = load_config(&c).unwrap();
+    assert_eq!(cfg.server.address, "[::]:9000");
+
+    // Test --bind with IPv4 and port
+    let c = CliArgs::parse_from(["impulse-server", "--bind", "127.0.0.1:8080", "--password-hash", TEST_HASH]);
+    let cfg = load_config(&c).unwrap();
+    assert_eq!(cfg.server.address, "127.0.0.1:8080");
+
+    // Test --bind with separate --port flag overriding
+    let c = CliArgs::parse_from(["impulse-server", "--bind", "127.0.0.1:8080", "--port", "5555", "--password-hash", TEST_HASH]);
+    let cfg = load_config(&c).unwrap();
+    assert_eq!(cfg.server.address, "127.0.0.1:5555");
+
+    // Test --bind without port using default 4433
+    let c = CliArgs::parse_from(["impulse-server", "--bind", "[::]", "--password-hash", TEST_HASH]);
+    let cfg = load_config(&c).unwrap();
+    assert_eq!(cfg.server.address, "[::]:4433");
+}

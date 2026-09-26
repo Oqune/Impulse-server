@@ -62,7 +62,7 @@ mod tests {
         assert!(!text.contains("san"), "san should be omitted: {text}");
         let parsed: AppConfig = toml::from_str(&text).unwrap();
         assert_eq!(parsed.server.password_hash, TEST_HASH);
-        assert_eq!(parsed.server.address, "0.0.0.0:4433");
+        assert_eq!(parsed.server.address, "[::]:4433");
         assert_eq!(parsed.server.cert_dir, "cert_data");
         let _ = std::fs::remove_file(&path);
     }
