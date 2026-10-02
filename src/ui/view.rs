@@ -61,8 +61,8 @@ pub struct LogRecord {
     pub timestamp: SystemTime,
 }
 
-/// Scroll helper: computes the rendered scroll offset (0 = bottom is the newest
-/// line; line 0 is the oldest) and whether live auto-scroll stays engaged.
+/// Scroll helper: returns the first rendered row counted from the oldest row,
+/// and whether the viewport is pinned to the latest rows.
 ///
 /// `total` = number of lines, `usable` = number of viewport rows available for
 /// lines (the caller must already exclude borders), `scroll_offset` = rows
@@ -72,11 +72,11 @@ pub fn compute_scroll(total: usize, usable: u16, scroll_offset: u16, auto: bool)
     if total <= usable {
         return (0, auto || scroll_offset == 0);
     }
-    let max_scroll = (total - usable) as u16;
+    let max_scroll = (total - usable).min(u16::MAX as usize) as u16;
     if auto {
         return (max_scroll, true);
     }
-    let y = scroll_offset.min(max_scroll);
+    let y = max_scroll.saturating_sub(scroll_offset);
     // Re-engage live when the user scrolls back to the very bottom.
     let re_pinned = y >= max_scroll;
     (y, re_pinned)
@@ -155,14 +155,14 @@ mod tests {
     #[test]
     fn compute_scroll_manual_disengages_auto() {
         let (y, auto) = compute_scroll(100, 10, 5, false);
-        assert_eq!(y, 5);
+        assert_eq!(y, 85);
         assert!(!auto);
     }
 
     #[test]
     fn compute_scroll_clamps_at_top() {
         let (y, _) = compute_scroll(50, 10, u16::MAX, false);
-        assert_eq!(y, 40); // 50 - 10 usable
+        assert_eq!(y, 0);
     }
 
     #[test]
