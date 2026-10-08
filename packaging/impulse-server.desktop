@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Impulse Server
+Comment=Sovereign LAN relay for post-quantum encrypted messaging
+Exec=impulse-server
+TryExec=impulse-server
+Icon=impulse-server
+Terminal=true
+Categories=Network;InstantMessaging;
+StartupNotify=false

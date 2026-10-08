@@ -77,6 +77,9 @@ clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 
+[build-dependencies]
+winresource = "0.1.31"
+
 [profile.release]
 opt-level = 3
 lto = true
@@ -95,6 +98,9 @@ assets = [
     ["target/release/impulse-server", "usr/bin/", "755"],
     ["packaging/config.toml", "etc/impulse-server/config.toml", "644"],
     ["packaging/impulse-server.service", "lib/systemd/system/", "644"],
+    ["packaging/impulse-server.desktop", "usr/share/applications/", "644"],
+    ["assets/brand/icon.svg", "usr/share/icons/hicolor/scalable/apps/impulse-server.svg", "644"],
+    ["assets/brand/icon-256.png", "usr/share/icons/hicolor/256x256/apps/impulse-server.png", "644"],
 ]
 
 [package.metadata.generate-rpm]
@@ -107,4 +113,7 @@ assets = [
     { source = "target/release/impulse-server", dest = "/usr/bin/impulse-server", mode = "755" },
     { source = "packaging/config.toml", dest = "/etc/impulse-server/config.toml", mode = "644" },
     { source = "packaging/impulse-server.service", dest = "/usr/lib/systemd/system/", mode = "644" },
+    { source = "packaging/impulse-server.desktop", dest = "/usr/share/applications/impulse-server.desktop", mode = "644" },
+    { source = "assets/brand/icon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/impulse-server.svg", mode = "644" },
+    { source = "assets/brand/icon-256.png", dest = "/usr/share/icons/hicolor/256x256/apps/impulse-server.png", mode = "644" },
 ]

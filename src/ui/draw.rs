@@ -239,7 +239,7 @@ fn draw_info(f: &mut ratatui::Frame, area: Rect, info: &ServerInfo, stats: &Serv
         ]),
         Line::from(vec![
             Span::styled("Transport: ", Style::default().fg(THEME.label)),
-            Span::styled("WebTransport/QUIC · TLS 1.3", Style::default().fg(THEME.header)),
+            Span::styled("WebTransport · TLS 1.3", Style::default().fg(THEME.header)),
         ]),
         Line::from(vec![
             Span::styled("Version: ", Style::default().fg(THEME.label)),
@@ -275,11 +275,25 @@ fn draw_info(f: &mut ratatui::Frame, area: Rect, info: &ServerInfo, stats: &Serv
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(ratatui::widgets::BorderType::Rounded)
-                .title(" Server ")
+                .title(" IMPULSE / Server ")
                 .border_style(Style::default().fg(THEME.border)),
         )
         .wrap(Wrap { trim: true });
     f.render_widget(block, area);
+    // Rows 1–3 have spare space. Keep the address row and counters clear, and
+    // omit the mark if a long address/version could wrap into that space.
+    let inner_width = area.width.saturating_sub(2);
+    if inner_width >= 40 && area.height >= 6
+        && info.address.len() + 8 <= usize::from(inner_width)
+        && info.version.len() + 25 <= usize::from(inner_width.saturating_sub(7))
+    {
+        crate::ui::brand::draw_mark(f, Rect {
+            x: area.x + area.width - 7,
+            y: area.y + 2,
+            width: 6,
+            height: 3,
+        });
+    }
 }
 
 fn draw_qr(f: &mut ratatui::Frame, area: Rect, cert: &CertView) {
@@ -525,7 +539,7 @@ fn draw_logs(f: &mut ratatui::Frame, area: Rect, filtered: &[&LogRecord], state:
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(format!(" Logs · {mode} "))
+        .title(format!(" Logs · {mode} · IMPULSE "))
         .border_style(Style::default().fg(THEME.border));
     f.render_widget(paragraph.block(block).scroll((scroll_y, 0)), area);
     if total > usize::from(usable) && usable > 0 && width > 0 {
@@ -759,6 +773,9 @@ mod tests {
                 assert!(text.contains("Sessions"));
                 assert!(text.contains("Logs"));
                 assert!(text.contains("72h"), "configured TTL must not be clipped");
+                assert!(text.contains("TLS 1.3"), "branding must not obscure transport");
+                assert!(text.contains("3.1.0"), "branding must not obscure version");
+                assert!(text.contains("Uptime:"), "branding must not obscure uptime");
             }
             if (width, height) == (150, 40)
                 && let Ok(path) = std::env::var("IMPULSE_TUI_SNAPSHOT") {
@@ -769,6 +786,9 @@ mod tests {
                             let cell = &buffer[(x, y)];
                             let escaped = cell.symbol().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
                             let colour = match cell.fg { Color::Rgb(r,g,b) => format!("#{r:02x}{g:02x}{b:02x}"), Color::Black => "#000000".into(), _ => "#F4F6FC".into() };
+                            if let Color::Rgb(r, g, b) = cell.bg {
+                                svg.push_str(&format!("<rect x=\"{}\" y=\"{}\" width=\"8\" height=\"16\" fill=\"#{r:02x}{g:02x}{b:02x}\"/>", x*8, y*16));
+                            }
                             svg.push_str(&format!("<text x=\"{}\" y=\"{}\" fill=\"{colour}\">{escaped}</text>", x*8, y*16+13));
                         }
                     }

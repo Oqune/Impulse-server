@@ -3,6 +3,7 @@
 
 pub mod draw;
 pub mod view;
+mod brand;
 
 #[cfg(test)]
 mod live_tests;
