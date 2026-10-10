@@ -14,7 +14,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use tracing::Level;
 
 use crate::ui::view::{CertView, LogRecord, ServerInfo, SessionRow, UserRow, ServerStats};
@@ -70,16 +70,16 @@ pub struct UiTheme {
 impl UiTheme {
     pub const fn dark() -> Self {
         Self {
-            border: Color::Gray,
-            border_focus: Color::Cyan,
-            header: Color::Cyan,
-            label: Color::Gray,
-            value: Color::White,
-            ok: Color::Green,
-            warn: Color::Yellow,
-            err: Color::Red,
-            dim: Color::DarkGray,
-            title: Color::White,
+            border: Color::Rgb(60, 76, 105),
+            border_focus: Color::Rgb(56, 121, 242),
+            header: Color::Rgb(168, 198, 255),
+            label: Color::Rgb(162, 174, 196),
+            value: Color::Rgb(244, 246, 252),
+            ok: Color::Rgb(114, 220, 176),
+            warn: Color::Rgb(240, 199, 107),
+            err: Color::Rgb(255, 133, 133),
+            dim: Color::Rgb(139, 154, 179),
+            title: Color::Rgb(244, 246, 252),
         }
     }
 }
@@ -89,11 +89,11 @@ pub const THEME: UiTheme = UiTheme::dark();
 
 pub fn level_style(level: Level) -> (Color, &'static str) {
     match level {
-        Level::ERROR => (Color::Red, "ERR"),
-        Level::WARN => (Color::Yellow, "WRN"),
-        Level::INFO => (Color::Cyan, "INF"),
-        Level::DEBUG => (Color::Magenta, "DBG"),
-        Level::TRACE => (Color::DarkGray, "TRC"),
+        Level::ERROR => (THEME.err, "ERR"),
+        Level::WARN => (THEME.warn, "WRN"),
+        Level::INFO => (THEME.header, "INF"),
+        Level::DEBUG => (Color::Rgb(182, 162, 240), "DBG"),
+        Level::TRACE => (THEME.dim, "TRC"),
     }
 }
 
@@ -163,8 +163,13 @@ pub(crate) fn draw(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ctx: &UiContext<'_>,
 ) -> anyhow::Result<()> {
-    terminal.draw(|f| {
+    terminal.draw(|f| draw_frame(f, ctx))?;
+    Ok(())
+}
+
+fn draw_frame(f: &mut ratatui::Frame, ctx: &UiContext<'_>) {
         let area = f.area();
+        f.render_widget(Block::default().style(Style::default().fg(THEME.value).bg(Color::Rgb(8, 12, 18))), area);
         let filtered: Vec<&LogRecord> = ctx.logs.iter().filter(|r| ctx.state.level_visible(&r.level)).collect();
         let filtered_total = filtered.len();
 
@@ -223,8 +228,6 @@ pub(crate) fn draw(
         }
 
         draw_status_bar(f, status_area, ctx, filtered_total);
-    })?;
-    Ok(())
 }
 
 fn draw_info(f: &mut ratatui::Frame, area: Rect, info: &ServerInfo, stats: &ServerStats) {
@@ -236,7 +239,7 @@ fn draw_info(f: &mut ratatui::Frame, area: Rect, info: &ServerInfo, stats: &Serv
         ]),
         Line::from(vec![
             Span::styled("Transport: ", Style::default().fg(THEME.label)),
-            Span::styled("WebTransport/QUIC · TLS 1.3", Style::default().fg(THEME.header)),
+            Span::styled("WebTransport · TLS 1.3", Style::default().fg(THEME.header)),
         ]),
         Line::from(vec![
             Span::styled("Version: ", Style::default().fg(THEME.label)),
@@ -272,11 +275,25 @@ fn draw_info(f: &mut ratatui::Frame, area: Rect, info: &ServerInfo, stats: &Serv
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(ratatui::widgets::BorderType::Rounded)
-                .title(" Server ")
+                .title(" IMPULSE / Server ")
                 .border_style(Style::default().fg(THEME.border)),
         )
         .wrap(Wrap { trim: true });
     f.render_widget(block, area);
+    // Rows 1–3 have spare space. Keep the address row and counters clear, and
+    // omit the mark if a long address/version could wrap into that space.
+    let inner_width = area.width.saturating_sub(2);
+    if inner_width >= 40 && area.height >= 6
+        && info.address.len() + 8 <= usize::from(inner_width)
+        && info.version.len() + 25 <= usize::from(inner_width.saturating_sub(7))
+    {
+        crate::ui::brand::draw_mark(f, Rect {
+            x: area.x + area.width - 7,
+            y: area.y + 2,
+            width: 6,
+            height: 3,
+        });
+    }
 }
 
 fn draw_qr(f: &mut ratatui::Frame, area: Rect, cert: &CertView) {
@@ -355,7 +372,7 @@ fn draw_left_column(
     if state.panel_mode == PanelMode::Full {
         let left_rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(6), Constraint::Min(7), Constraint::Min(5)])
+            .constraints([Constraint::Length(9), Constraint::Min(7), Constraint::Length(8)])
             .split(area);
         draw_info(f, left_rows[0], info, stats);
         draw_qr(f, left_rows[1], cert);
@@ -490,33 +507,50 @@ fn draw_sessions(f: &mut ratatui::Frame, area: Rect, sessions: &[SessionRow]) {
 }
 
 fn draw_logs(f: &mut ratatui::Frame, area: Rect, filtered: &[&LogRecord], state: &TuiState) {
-    // Render only the visible window (spec §3 Performance). `filtered` was
-    // already computed once in `draw`.
-    let usable = area.height.saturating_sub(2) as usize;
-    let (scroll_y, _auto) = compute_scroll(filtered.len(), area.height.saturating_sub(2), state.scroll_offset, state.auto_scroll);
-
+    let usable = area.height.saturating_sub(2);
+    let width = area.width.saturating_sub(2);
     let search = state.search.as_ref().map(|s| s.query.as_str());
-    let start = scroll_y as usize;
-    let visible = filtered.iter().skip(start).take(usable.max(1)).map(|rec| {
+    let lines = filtered.iter().map(|rec| {
         let (color, lvl) = level_style(rec.level);
         let mut spans = vec![
             Span::styled(format_timestamp(rec.timestamp), Style::default().fg(THEME.dim)),
             Span::styled(format!(" [{}] ", lvl), Style::default().fg(color)),
-            Span::styled(format!("{}: ", rec.target), Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{}: ", rec.target), Style::default().fg(THEME.header).add_modifier(Modifier::BOLD)),
         ];
-        spans.extend(message_spans(rec, search, Style::default()));
+        spans.extend(message_spans(rec, search, Style::default().fg(THEME.value)));
         Line::from(spans)
     }).collect::<Vec<Line>>();
 
+    let paragraph = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
+    // Use ratatui's own wrapping engine: byte/character estimates disagree on
+    // wide Unicode and word boundaries. Count without borders.
+    let total = paragraph.line_count(width);
+    state.log_rows.set(total);
+    state.log_max_scroll.set(total.saturating_sub(usize::from(usable)).min(u16::MAX as usize) as u16);
+    let appended = state.history_rows.map(|rows| total.saturating_sub(rows)).unwrap_or(0);
+    let offset = usize::from(state.scroll_offset).saturating_add(appended).min(u16::MAX as usize) as u16;
+    let (mut scroll_y, _) = compute_scroll(total, usable, offset, state.auto_scroll);
+    if let Some(selected) = state.search.as_ref().and_then(|s| s.selected) {
+        let before = Paragraph::new(lines.into_iter().take(selected).collect::<Vec<_>>())
+            .wrap(Wrap { trim: false }).line_count(width);
+        scroll_y = before.min(total.saturating_sub(usize::from(usable))).min(u16::MAX as usize) as u16;
+    }
+    let mode = if state.paused { "PAUSED" } else if state.auto_scroll { "LIVE" } else { "HISTORY" };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(" Logs ")
+        .title(format!(" Logs · {mode} · IMPULSE "))
         .border_style(Style::default().fg(THEME.border));
-    let paragraph = Paragraph::new(visible)
-        .block(block)
-        .wrap(Wrap { trim: false });
-    f.render_widget(paragraph, area);
+    f.render_widget(paragraph.block(block).scroll((scroll_y, 0)), area);
+    if total > usize::from(usable) && usable > 0 && width > 0 {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None).end_symbol(None)
+            .thumb_style(Style::default().fg(THEME.border_focus))
+            .track_style(Style::default().fg(THEME.border));
+        let mut scrollbar_state = ScrollbarState::new(total.saturating_sub(usize::from(usable)))
+            .position(usize::from(scroll_y)).viewport_content_length(usize::from(usable));
+        f.render_stateful_widget(scrollbar, Rect { y: area.y.saturating_add(1), height: usable, ..area }, &mut scrollbar_state);
+    }
 }
 
 /// Split a log message into spans, highlighting every case-insensitive match of
@@ -576,7 +610,10 @@ fn draw_status_bar(
     let stats = ctx.stats;
     let info = ctx.info;
     let mut spans: Vec<Span> = Vec::new();
-    spans.push(Span::styled("● LIVE  ", Style::default().fg(THEME.ok)));
+    spans.push(Span::styled(
+        if state.paused { "PAUSED  " } else { "● LIVE  " },
+        Style::default().fg(if state.paused { THEME.warn } else { THEME.ok }),
+    ));
     spans.push(Span::styled(
         format!("S {}/{}  ", stats.sessions.load(relaxed), info.max_sessions),
         Style::default().fg(THEME.value),
@@ -657,6 +694,107 @@ mod tests {
             target: "test".to_string(),
             message: message.to_string(),
             timestamp: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    fn render_logs(logs: &[LogRecord], state: &TuiState, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        let filtered: Vec<_> = logs.iter().filter(|r| state.level_visible(&r.level)).collect();
+        terminal.draw(|f| draw_logs(f, f.area(), &filtered, state)).unwrap();
+        terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect()
+    }
+
+    #[test]
+    fn rendered_scroll_moves_back_one_row_and_home_end_work() {
+        let logs: Vec<_> = (0..20).map(|i| rec(&format!("ROW{i:02}"))).collect();
+        let mut state = TuiState { auto_scroll: true, ..Default::default() };
+        let bottom = render_logs(&logs, &state, 60, 7);
+        assert!(bottom.contains("ROW19"));
+        state.scroll_up(1);
+        let previous = render_logs(&logs, &state, 60, 7);
+        assert!(previous.contains("ROW14"));
+        assert!(!previous.contains("ROW19"));
+        state.scroll_to_top();
+        assert!(render_logs(&logs, &state, 60, 7).contains("ROW00"));
+        state.scroll_to_bottom();
+        assert!(render_logs(&logs, &state, 60, 7).contains("ROW19"));
+    }
+
+    #[test]
+    fn wrapped_log_tail_remains_visible_and_scrollable() {
+        let logs = vec![rec(&format!("{} TAILMARK", "word ".repeat(40)))];
+        let mut state = TuiState { auto_scroll: true, ..Default::default() };
+        assert!(render_logs(&logs, &state, 40, 6).contains("TAILMARK"));
+        state.scroll_to_top();
+        assert!(render_logs(&logs, &state, 40, 6).contains("[INF]"));
+        assert!(!render_logs(&logs, &state, 40, 6).contains("TAILMARK"));
+    }
+
+    #[test]
+    fn empty_and_tiny_log_viewports_render_without_panics() {
+        for (width, height) in [(0, 0), (1, 1), (2, 2), (32, 5)] {
+            render_logs(&[], &TuiState::default(), width, height);
+        }
+    }
+
+    #[test]
+    fn history_stays_put_when_new_logs_arrive_and_home_down_moves() {
+        let mut logs: Vec<_> = (0..20).map(|i| rec(&format!("ROW{i:02}"))).collect();
+        let mut state = TuiState { auto_scroll: true, ..Default::default() };
+        render_logs(&logs, &state, 60, 7);
+        state.scroll_up(3);
+        let before = render_logs(&logs, &state, 60, 7);
+        logs.push(rec("ROW20"));
+        let after = render_logs(&logs, &state, 60, 7);
+        assert_eq!(before, after);
+        state.scroll_to_top();
+        render_logs(&logs, &state, 60, 7);
+        state.scroll_down(1);
+        let next = render_logs(&logs, &state, 60, 7);
+        assert!(!next.contains("ROW00"));
+        assert!(next.contains("ROW01"));
+    }
+
+    #[test]
+    fn full_dashboard_renders_all_tiers_and_exports_optional_snapshot() {
+        let logs = vec![rec("Relay ready"), rec("Client authenticated"), rec("Opaque payload relayed")];
+        let cert = CertView { fingerprint_raw: "ab".repeat(32), fingerprint_grouped: "ABCD ".repeat(16), expires_in: 86400, ..Default::default() };
+        let info = ServerInfo { address: "[::]:4433".into(), version: "3.1.0".into(), ttl_hours: 72, max_payload: 1048576, max_sessions: 1024, ..Default::default() };
+        let stats = ServerStats::new();
+        let state = TuiState { auto_scroll: true, ..Default::default() };
+        let ctx = UiContext { logs: &logs, cert: &cert, info: &info, stats: &stats, sessions: &[], users: &[], state: &state, has_clipboard: false, throughput: 0 };
+        for (width, height) in [(1, 1), (80, 20), (90, 24), (124, 24), (125, 24), (150, 40)] {
+            let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| draw_frame(f, &ctx)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+            if width >= 90 && height >= 24 {
+                assert!(text.contains("Server"));
+                assert!(text.contains("Sessions"));
+                assert!(text.contains("Logs"));
+                assert!(text.contains("72h"), "configured TTL must not be clipped");
+                assert!(text.contains("TLS 1.3"), "branding must not obscure transport");
+                assert!(text.contains("3.1.0"), "branding must not obscure version");
+                assert!(text.contains("Uptime:"), "branding must not obscure uptime");
+            }
+            if (width, height) == (150, 40)
+                && let Ok(path) = std::env::var("IMPULSE_TUI_SNAPSHOT") {
+                    assert!(!text.contains("QR: enlarge"), "QR must fit in the full-size dashboard");
+                    let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\"><rect width=\"100%\" height=\"100%\" fill=\"#080C12\"/><g font-family=\"Consolas,monospace\" font-size=\"13\">", width*8, height*16, width*8, height*16);
+                    for y in 0..height {
+                        for x in 0..width {
+                            let cell = &buffer[(x, y)];
+                            let escaped = cell.symbol().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+                            let colour = match cell.fg { Color::Rgb(r,g,b) => format!("#{r:02x}{g:02x}{b:02x}"), Color::Black => "#000000".into(), _ => "#F4F6FC".into() };
+                            if let Color::Rgb(r, g, b) = cell.bg {
+                                svg.push_str(&format!("<rect x=\"{}\" y=\"{}\" width=\"8\" height=\"16\" fill=\"#{r:02x}{g:02x}{b:02x}\"/>", x*8, y*16));
+                            }
+                            svg.push_str(&format!("<text x=\"{}\" y=\"{}\" fill=\"{colour}\">{escaped}</text>", x*8, y*16+13));
+                        }
+                    }
+                    svg.push_str("</g></svg>");
+                    std::fs::write(path, svg).unwrap();
+            }
         }
     }
 

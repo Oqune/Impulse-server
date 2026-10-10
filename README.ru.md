@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/brand/readme-banner.png" alt="Impulse Server" width="100%">
+
 # Impulse Server
 
 **Высокопроизводительный эфемерный WebTransport (QUIC) релей для постквантового E2EE мессенджера**

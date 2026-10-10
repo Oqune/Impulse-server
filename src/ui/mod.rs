@@ -3,8 +3,13 @@
 
 pub mod draw;
 pub mod view;
+mod brand;
+
+#[cfg(test)]
+mod live_tests;
 
 use std::collections::HashSet;
+use std::cell::Cell;
 use std::io::Stdout;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -24,6 +29,21 @@ use crate::ui::view::{CertView, LogRecord, ServerInfo, SessionRow, UserRow};
 /// Max number of log lines retained for the TUI (spec §3: 500 → 2000).
 const MAX_LOG_LINES: usize = 2000;
 
+/// Restore terminal modes on every exit, including setup/render/input errors.
+struct TerminalModes;
+
+impl Drop for TerminalModes {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            terminal::LeaveAlternateScreen,
+            crossterm::event::DisableMouseCapture,
+            crossterm::cursor::Show
+        );
+    }
+}
+
 /// Left-panel visibility, cycled with `Tab` (spec §3: full → QR-only → hidden).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PanelMode {
@@ -39,6 +59,8 @@ pub struct SearchState {
     pub query: String,
     /// Round-robin index over the match list, advanced by `Enter`.
     pub cursor: usize,
+    /// Selected index in the severity-filtered records, resolved to wrapped rows at draw time.
+    pub selected: Option<usize>,
 }
 
 /// Scroll + filter + search + panel state for the log viewport.
@@ -51,6 +73,9 @@ pub struct TuiState {
     pub panel_mode: PanelMode,
     pub qr_focus: bool,
     pub search: Option<SearchState>,
+    pub log_rows: Cell<usize>,
+    pub log_max_scroll: Cell<u16>,
+    pub history_rows: Option<usize>,
 }
 
 impl TuiState {
@@ -66,32 +91,49 @@ impl TuiState {
         if !self.active_filters.insert(level) {
             self.active_filters.remove(&level);
         }
+        self.scroll_to_bottom();
     }
 
     pub fn scroll_up(&mut self, amount: u16) {
+        self.clear_search_target();
         self.auto_scroll = false;
-        self.scroll_offset = self.scroll_offset.saturating_add(amount);
+        if self.history_rows.is_none() {
+            self.history_rows = Some(self.log_rows.get());
+        }
+        self.scroll_offset = self.scroll_offset.saturating_add(amount).min(self.log_max_scroll.get());
     }
 
     pub fn scroll_down(&mut self, amount: u16) {
+        self.clear_search_target();
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
         if self.scroll_offset == 0 {
             self.auto_scroll = true;
+            self.history_rows = None;
         }
     }
 
     pub fn scroll_to_bottom(&mut self) {
+        self.clear_search_target();
         self.scroll_offset = 0;
         self.auto_scroll = true;
+        self.history_rows = None;
     }
 
     pub fn scroll_to_top(&mut self) {
+        self.clear_search_target();
         self.auto_scroll = false;
-        self.scroll_offset = u16::MAX;
+        self.history_rows = Some(self.log_rows.get());
+        self.scroll_offset = self.log_max_scroll.get();
     }
 
     pub fn search_active(&self) -> bool {
         self.search.is_some()
+    }
+
+    fn clear_search_target(&mut self) {
+        if let Some(search) = self.search.as_mut() {
+            search.selected = None;
+        }
     }
 }
 
@@ -169,6 +211,7 @@ pub(crate) fn run_tui(inputs: TuiInputs) -> anyhow::Result<()> {
     } = inputs;
     let mut stdout: Stdout = std::io::stdout();
     terminal::enable_raw_mode()?;
+    let _terminal_modes = TerminalModes;
     crossterm::execute!(
         stdout,
         terminal::EnterAlternateScreen,
@@ -306,12 +349,16 @@ fn handle_key(
             KeyCode::Backspace => {
                 if let Some(s) = state.search.as_mut() {
                     s.query.pop();
+                    s.cursor = 0;
+                    s.selected = None;
                 }
             }
             KeyCode::Enter => jump_to_next_match(state, logs),
             KeyCode::Char(c) => {
                 if let Some(s) = state.search.as_mut() {
                     s.query.push(c);
+                    s.cursor = 0;
+                    s.selected = None;
                 }
             }
             _ => {}
@@ -337,7 +384,10 @@ fn handle_key(
         KeyCode::Char('4') => state.toggle_filter(Level::DEBUG),
         KeyCode::Char('5') => state.toggle_filter(Level::TRACE),
         KeyCode::Char(' ') => state.paused = !state.paused,
-        KeyCode::Char('c') => logs.clear(),
+        KeyCode::Char('c') => {
+            logs.clear();
+            state.scroll_to_bottom();
+        }
         KeyCode::Char('f') => state.qr_focus = !state.qr_focus,
         KeyCode::Tab => {
             state.panel_mode = match state.panel_mode {
@@ -355,18 +405,15 @@ fn handle_key(
     false
 }
 
-/// Scroll so the next line matching the query is at the top of the viewport.
-/// `scroll_offset` is the number of lines to skip from the oldest line (see
-/// `draw_logs`), so the matched line index doubles as the offset; `compute_scroll`
-/// clamps it to `total - usable`. If filters are active the indices are
-/// approximate — recompute over the filtered slice if precision matters.
+/// Select the next matching visible record. Rendering resolves its wrapped row.
 fn jump_to_next_match(state: &mut TuiState, logs: &[LogRecord]) {
+    let visible: Vec<_> = logs.iter().filter(|rec| state.level_visible(&rec.level)).collect();
     let Some(search) = state.search.as_mut() else { return };
     let query = search.query.to_lowercase();
     if query.is_empty() {
         return;
     }
-    let matches: Vec<usize> = logs
+    let matches: Vec<usize> = visible
         .iter()
         .enumerate()
         .filter(|(_, rec)| rec.message.to_lowercase().contains(&query))
@@ -377,13 +424,13 @@ fn jump_to_next_match(state: &mut TuiState, logs: &[LogRecord]) {
     }
     let line = matches[search.cursor % matches.len()];
     search.cursor += 1;
-    state.scroll_offset = line as u16;
+    search.selected = Some(line);
     state.auto_scroll = false;
 }
 
 /// Build the TUI channels and spawn the TUI thread. Returns a [`TuiHandle`].
 pub fn spawn_tui(initial: CertView, shutdown: Arc<tokio::sync::Notify>) -> anyhow::Result<TuiHandle> {
-    let (log_tx, log_rx) = crossbeam_channel::unbounded::<LogRecord>();
+    let (log_tx, log_rx) = crossbeam_channel::bounded::<LogRecord>(MAX_LOG_LINES);
     let cert = Arc::new(Mutex::new(initial));
     let info = Arc::new(Mutex::new(ServerInfo::default()));
     let stats = Arc::new(ServerStats::new());
@@ -405,6 +452,7 @@ pub fn spawn_tui(initial: CertView, shutdown: Arc<tokio::sync::Notify>) -> anyho
         // no Ok(()) was sent; propagate the error so spawn_tui does not return a
         // live handle for a TUI that never started.
         let init_tx2 = init_tx.clone();
+        let error_shutdown = shutdown_clone.clone();
         let inputs = TuiInputs {
             log_rx,
             cert: cert_clone,
@@ -416,6 +464,7 @@ pub fn spawn_tui(initial: CertView, shutdown: Arc<tokio::sync::Notify>) -> anyho
             init_tx,
         };
         if let Err(e) = run_tui(inputs) {
+            error_shutdown.notify_one();
             let _ = init_tx2.send(Err(e));
         }
     });
@@ -423,7 +472,7 @@ pub fn spawn_tui(initial: CertView, shutdown: Arc<tokio::sync::Notify>) -> anyho
     match init_rx.recv_timeout(Duration::from_secs(2)) {
         Ok(Ok(())) => {}
         Ok(Err(e)) => return Err(anyhow::anyhow!("TUI failed to start: {}", e)),
-        Err(_) => {}
+        Err(e) => return Err(anyhow::anyhow!("TUI startup acknowledgement failed: {}", e)),
     }
 
     Ok(TuiHandle {
@@ -435,4 +484,41 @@ pub fn spawn_tui(initial: CertView, shutdown: Arc<tokio::sync::Notify>) -> anyho
         users,
         shutdown,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyboard_page_and_mouse_step_scroll_state_returns_to_live() {
+        let mut state = TuiState::new();
+        state.log_max_scroll.set(100);
+        state.scroll_up(3);
+        state.scroll_up(20);
+        assert_eq!(state.scroll_offset, 23);
+        assert!(!state.auto_scroll);
+        state.scroll_down(20);
+        state.scroll_down(3);
+        assert_eq!(state.scroll_offset, 0);
+        assert!(state.auto_scroll);
+    }
+
+    #[test]
+    fn search_indices_follow_filtered_records_and_cycle() {
+        let logs = vec![Level::DEBUG, Level::INFO, Level::INFO].into_iter().map(|level| LogRecord {
+            level, target: "test".into(), message: "needle".into(), timestamp: SystemTime::UNIX_EPOCH,
+        }).collect::<Vec<_>>();
+        let mut state = TuiState::new();
+        state.toggle_filter(Level::INFO);
+        state.search = Some(SearchState { query: "needle".into(), ..Default::default() });
+        jump_to_next_match(&mut state, &logs);
+        assert_eq!(state.search.as_ref().unwrap().selected, Some(0));
+        jump_to_next_match(&mut state, &logs);
+        assert_eq!(state.search.as_ref().unwrap().selected, Some(1));
+        jump_to_next_match(&mut state, &logs);
+        assert_eq!(state.search.as_ref().unwrap().selected, Some(0));
+        state.scroll_up(1);
+        assert_eq!(state.search.as_ref().unwrap().selected, None);
+    }
 }

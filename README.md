@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/brand/readme-banner.png" alt="Impulse Server" width="100%">
+
 # Impulse Server
 
 **High-Performance Ephemeral WebTransport (QUIC) Relay for Post-Quantum E2EE Messaging**
