@@ -4,20 +4,20 @@
 
 # Impulse Server
 
-**High-Performance Ephemeral WebTransport (QUIC) Relay for Post-Quantum E2EE Messaging**
+**WebTransport (QUIC) Relay Research Prototype for Encrypted Messaging**
 
 [English](README.md) | [Русский](README.ru.md)
 
 [![Rust](https://img.shields.io/badge/Rust-1.85%2B-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Transport](https://img.shields.io/badge/Transport-WebTransport%20%2F%20QUIC-00E5FF)](https://w3c.github.io/webtransport/)
-[![Security](https://img.shields.io/badge/Security-Zero--Knowledge%20Relay-22c55e)](#security)
+[![Security](https://img.shields.io/badge/Security-Encrypted%20Content%20Relay-22c55e)](#security)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/Oqune/Impulse-server/actions/workflows/server-build.yml/badge.svg)](https://github.com/Oqune/Impulse-server/actions/workflows/server-build.yml)
 [![Release](https://img.shields.io/github/v/release/Oqune/Impulse-server?label=latest&color=7928CA)](https://github.com/Oqune/Impulse-server/releases)
 
 </div>
 
-> **Zero-Knowledge Relay:** Secure, ephemeral relay server engineered in portable Rust (edition 2024). The server acts as a blind broker: it never inspects, decrypts, or persists plaintext. All payloads are encapsulated on client endpoints and buffered in RAM with an automatic 72-hour TTL.
+> **Prototype status:** Research relay for isolated-network messaging; it is not certified or validated for critical-infrastructure/high-assurance production use. The relay does not decrypt message bodies, but it sees routing identifiers and timing and broadcasts packets to connected clients. Hybrid post-quantum TLS negotiation has not been verified in the runtime.
 >
 > Android Client: [Oqune/Impulse-client](https://github.com/Oqune/Impulse-client).
 
@@ -28,7 +28,7 @@
 | Parameter | Implementation | Details |
 | :--- | :--- | :--- |
 | **Networking** | `wtransport` 0.7 (QUIC / TLS 1.3) | Single UDP port (default 4433), IPv4/IPv6 Dual-Stack (`[::]:4433`, fallback to `0.0.0.0:4433`), connection migration |
-| **Relay Security** | Blind / Opaque Relay | Zero plaintext visibility, per-recipient KEM blobs |
+| **Relay Security** | Encrypted-content relay | Message bodies opaque; outer routing identifiers visible; packets broadcast to connected clients |
 | **Authentication** | Argon2id + HMAC-SHA-256 | OWASP parameters ($m=47104, t=3, p=1$), constant-time verify |
 | **TLS Lifecycle** | ECDSA P-256 (Self-Signed) | 14-day lifetime, automatic live rotation with 4-day overlap |
 | **Memory Storage** | In-RAM Ring Buffer | Monotonic 64-bit sequence IDs, 72h TTL, 1 MB per payload |
@@ -38,11 +38,11 @@
 
 ## Overview
 
-Impulse is a relay server for an end-to-end-encrypted messenger. The server
-**never sees plaintext** — clients encrypt payloads locally (Per-Recipient KEM
-Wrapping, ML-KEM-768 + AES-256-GCM) and hand the server only opaque bytes, a
-sequence id, a timestamp, and per-message public keys. Messages live in RAM
-(72h TTL), ids are monotonic, and broadcasts go to every connected client.
+Impulse is a research-prototype relay server for encrypted messaging. Clients
+encrypt message bodies locally; the relay sees outer sender/recipient
+identifiers and timestamps, stores packets in RAM (configured 72h TTL), and
+broadcasts them to connected clients. Recipient filtering and decryption happen
+on clients. This does not hide communication metadata or relationships.
 
 Key design points:
 
@@ -103,7 +103,7 @@ CLI flags always override the config file; `--license` prints the MIT license.
 `password_hash` is **required** — there is no insecure default. Configure it
 with `--init`, `--password-hash <hash>`, or `server.password_hash` in `config.toml`.
 
-## Production deployment
+## Example deployment configuration
 
 ### Requirements
 
@@ -253,7 +253,7 @@ followed by `len` bytes.
 | `0x21` | Session | both | Heartbeat | `u64` client_timestamp (echoed back) |
 | `0x22` | Session | S→C | NewCertHash | exactly 32 raw SHA-256 bytes + `u64` unix expiry |
 | `0x23` | Session | both | Disconnect | no payload (graceful close from either side) |
-| `0x31` | Data | C→S / S→C | KeyExchangeKemDsa | combined ML-KEM + ML-DSA-65 public keys (relayed atomically) |
+| `0x31` | Data | C→S / S→C | KeyExchangeKemDsa | combined ML-KEM + Dilithium3 public keys (relayed atomically) |
 | `0x32` | Data | C→S / S→C | Data | C→S: `len`-prefixed payload. S→C: `u64 id`, `u64 ts`, `len`-prefixed payload |
 | `0x33` | Data | C→S | Sync | `u64` last_seen_id |
 | `0x34` | Data | S→C | SyncResponse | `u32` count, then per message: `u64 id`, `u64 ts`, `len`-prefixed payload |
@@ -272,8 +272,8 @@ limit before allocating, preventing CPU-DoS via inflated length prefixes.
 - Short-lived ECDSA P-256 certs (14 d) with automatic rotation (4 d overlap),
   applied to the **live** TLS resolver without restart, announced via `NewCertHash`.
 - TOFU fingerprint pinning via QR code + `NewCertHash`.
-- Post-quantum hybrid TLS key exchange (X25519Kyber768) via `aws-lc-rs`.
-- **Blind relay** — the server never decrypts payloads; it only sees opaque bytes.
+- Hybrid post-quantum TLS negotiation has not been verified in the runtime/test evidence.
+- Encrypted message bodies are not decrypted by the relay; outer identifiers and timing are visible, and packets are broadcast.
 - Ephemeral RAM-only storage, 72h TTL, bounded ring buffer and payload size.
 - Passwords stored as Argon2id hashes; constant-time HMAC comparison.
 - Per-IP rate limiting (10 connections / 10 s) and session caps against DoS.
