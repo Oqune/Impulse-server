@@ -30,18 +30,18 @@ fn session_read_timeout(authenticated: bool, auth_deadline: Instant, now: Instan
 }
 
 const SYNC_FRAME_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const SYNC_OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const AUTHENTICATED_PACKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 enum DirectResponseWriteError {
     Io(std::io::Error),
     SyncTimeout,
 }
 
-async fn timeout_sync_operation<F: std::future::Future>(
+pub(crate) async fn timeout_packet_processing<F: std::future::Future>(
     timeout: std::time::Duration,
-    operation: F,
+    processing: F,
 ) -> Result<F::Output, tokio::time::error::Elapsed> {
-    tokio::time::timeout(timeout, operation).await
+    tokio::time::timeout(timeout, processing).await
 }
 
 async fn write_direct_response<W: AsyncWriteExt + Unpin>(
@@ -464,21 +464,25 @@ impl RelayServer {
                                             packet_len
                                         );
                                         let was_authenticated = session.authenticated;
-                                        let is_sync = packet_data.first() == Some(&crate::protocol::Opcode::Sync.as_u8());
                                         let process = crate::relay::auth::process_packet(
                                             &this, &mut session, &direct_tx, &packet_data,
                                         );
-                                        let packet_result = if was_authenticated && is_sync {
-                                            match timeout_sync_operation(SYNC_OPERATION_TIMEOUT, process).await {
+                                        let packet_result = if was_authenticated {
+                                            match timeout_packet_processing(
+                                                AUTHENTICATED_PACKET_TIMEOUT,
+                                                process,
+                                            ).await {
                                                 Ok(result) => result,
                                                 Err(_) => {
-                                                    warn!("[SYNC] Session {} Sync operation exceeded {}s (including admission/backpressure); closing so it can resume after reconnect",
-                                                        session_key, SYNC_OPERATION_TIMEOUT.as_secs());
+                                                    warn!(
+                                                        "[SESSION] Session {} opcode=0x{:02x} packet processing exceeded {}s; closing",
+                                                        session_key,
+                                                        op,
+                                                        AUTHENTICATED_PACKET_TIMEOUT.as_secs()
+                                                    );
                                                     break 'read;
                                                 }
                                             }
-                                        } else if was_authenticated {
-                                            process.await
                                         } else {
                                             match tokio::time::timeout_at(
                                                 tokio::time::Instant::from_std(auth_deadline),
@@ -615,7 +619,7 @@ fn cleanup_session_state(
 mod tests {
     use super::{
         BudgetedBuffer, DirectResponse, DirectResponseWriteError, SessionMeta, cleanup_session_state,
-        session_read_timeout, timeout_sync_operation, write_direct_response,
+        session_read_timeout, timeout_packet_processing, write_direct_response,
     };
     use crate::relay::ServerStats;
     use crate::relay::KeyExchangeStore;
@@ -675,14 +679,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_operation_deadline_bounds_waiting_for_admission() {
+    async fn authenticated_packet_deadline_bounds_waiting_for_admission() {
         let permits = Arc::new(tokio::sync::Semaphore::new(1));
         let held = permits.clone().acquire_owned().await.unwrap();
-        let result = timeout_sync_operation(
+        let result = timeout_packet_processing(
             Duration::from_millis(10),
             permits.clone().acquire_owned(),
         ).await;
-        assert!(result.is_err(), "a Sync waiting for admission must hit its operation deadline");
+        assert!(result.is_err(), "packet processing waiting for admission must hit its deadline");
         drop(held);
         assert_eq!(permits.available_permits(), 1);
     }

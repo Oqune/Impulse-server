@@ -74,6 +74,29 @@ async fn live_pinned_quic_auth_heartbeat_relay_and_sync() {
         address: "127.0.0.1:0".into(), password_hash: hash,
         cert_dir: directory.to_string_lossy().into_owned(), ..Default::default()
     }, Arc::new(tokio::sync::Mutex::new(manager)), tui.clone()).await.unwrap());
+
+    // A full direct-response channel can block an authenticated Heartbeat
+    // handler even though the packet itself is small. Exercise the production
+    // handler and the same deadline wrapper used by the session reader.
+    let (direct_tx, mut direct_rx) = tokio::sync::mpsc::channel::<crate::relay::DirectResponse>(1);
+    direct_tx.send(crate::relay::DirectResponse::plain(vec![0])).await.unwrap();
+    let mut heartbeat_session = crate::relay::session::Session::new(
+        0xfeed,
+        "127.0.0.1".parse().unwrap(),
+    );
+    heartbeat_session.authenticated = true;
+    let heartbeat_packet = crate::protocol::encode_heartbeat(123);
+    let heartbeat_processing = crate::relay::auth::process_packet(
+        &relay, &mut heartbeat_session, &direct_tx, &heartbeat_packet,
+    );
+    let deadline = crate::relay::session::timeout_packet_processing(
+        Duration::from_millis(50),
+        heartbeat_processing,
+    ).await;
+    assert!(deadline.is_err(), "Heartbeat processing must not wait indefinitely for the writer channel");
+    assert!(direct_rx.try_recv().is_ok(), "the already-queued response remains owned by the writer side");
+    assert!(direct_rx.try_recv().is_err(), "timed-out Heartbeat response must not remain queued");
+
     let address = tui.info.lock().unwrap().address.clone();
     let task = tokio::spawn(relay.run(shutdown.clone()));
     let endpoint = Endpoint::client(ClientConfig::builder().with_bind_default()

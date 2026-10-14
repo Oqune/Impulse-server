@@ -20,6 +20,7 @@ Also bound unauthenticated session admission: opening the required client-initia
 - Permit at most 16 concurrent Sync handlers and 16 global Sync frame buffers. Each frame-buffer permit must be acquired before cloning a store page and must travel with the encoded response until the writer flushes it or a disconnect/error drops it. A frame can transiently coexist with its retained page (approximately 8 MiB per permit, plus task/container overhead), bounding this application-level outbound working set near 128 MiB independently of the 1,024-session ceiling; no page may be allocated while waiting for a frame permit. This does not bound WebTransport/QUIC internals or total process memory.
 - Bound writing/flushing a Sync frame to 30 seconds; if a peer stops consuming and blocks flow control, close that session so the frame permit is returned rather than held indefinitely.
 - Bound the full Sync operation to 30 seconds from packet processing start, including waiting for operation/frame admission, page construction, and response-channel backpressure. On expiry close the session and release queued frame permits; the client can resume from its last processed message ID after reconnect. Very large or slow syncs may therefore require reconnect/resume.
+- Bound processing of every packet on an authenticated session to 30 seconds, including waiting to enqueue direct responses (for example, a Heartbeat response) when the writer is stalled. On expiry close the session and run the ordinary session cleanup. Keep the unauthenticated absolute nonce deadline unchanged; apply this per-packet bound only after authentication. Log only session ID, opcode, and elapsed limit.
 
 ## Required behavior
 
@@ -38,6 +39,7 @@ Also bound unauthenticated session admission: opening the required client-initia
 - Shutdown regression test proving one notification wakes all coordinated accept loops, including a real dual-stack loopback test where supported.
 - Sync frame-budget regression proves the permit remains held while a response is queued and is returned when the response is dropped, including failed channel delivery.
 - A stalled Sync writer regression proves the write deadline closes the operation and returns its frame permit.
+- A saturated direct-response channel regression runs the actual authenticated Heartbeat handler and proves the common packet-processing deadline expires and cancels the blocked send. The session lifecycle regression verifies that the reader's exit path releases session state.
 - Existing server tests and clippy must pass. No build/test result is asserted in this SPEC; owner will run the final test gate after the implementation.
 
 ## Out of scope
