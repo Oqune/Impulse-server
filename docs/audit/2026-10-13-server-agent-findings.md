@@ -1,7 +1,7 @@
 # Impulse Server — read-only audit findings
 
-Дата: 2026-10-13  
-Область: Rust server, auth, framing/resource limits, replay/sync/TTL, certificate rotation, Tokio shutdown, logging/privacy, TUI и тестовое покрытие.  
+Дата: 2026-10-13
+Область: Rust server, auth, framing/resource limits, replay/sync/TTL, certificate rotation, Tokio shutdown, logging/privacy, TUI и тестовое покрытие.
 Ограничения проверки: только чтение и статический анализ. Сборки и тесты не запускались по поручению корневого агента. `server/config.toml`, логи, ключи и персональные секреты не читались. Wire v3 и код не изменялись.
 
 ## Краткий вывод
