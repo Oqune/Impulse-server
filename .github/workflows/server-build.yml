@@ -207,6 +207,11 @@ jobs:
       contents: write
 
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Require reviewed release notes
+        run: test -s "docs/releases/${GITHUB_REF_NAME}.md"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -217,4 +222,6 @@ jobs:
         with:
           name: Impulse Server ${{ github.ref_name }}
           files: artifacts/**/*
-          generate_release_notes: true
+          body_path: docs/releases/${{ github.ref_name }}.md
+          draft: true
+          fail_on_unmatched_files: true

@@ -8,7 +8,7 @@
 
 [English](README.md) | [Русский](README.ru.md)
 
-[![Rust](https://img.shields.io/badge/Rust-1.85%2B-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/Rust-1.88%2B-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Transport](https://img.shields.io/badge/Transport-WebTransport%20%2F%20QUIC-00E5FF)](https://w3c.github.io/webtransport/)
 [![Security](https://img.shields.io/badge/Security-Encrypted%20Content%20Relay-22c55e)](#security)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -29,9 +29,9 @@
 | :--- | :--- | :--- |
 | **Networking** | `wtransport` 0.7 (QUIC / TLS 1.3) | Single UDP port (default 4433), IPv4/IPv6 Dual-Stack (`[::]:4433`, fallback to `0.0.0.0:4433`), connection migration |
 | **Relay Security** | Encrypted-content relay | Message bodies opaque; outer routing identifiers visible; packets broadcast to connected clients |
-| **Authentication** | Argon2id + HMAC-SHA-256 | OWASP parameters ($m=47104, t=3, p=1$), constant-time verify |
+| **Authentication** | Argon2id v19 + HMAC-SHA-256 | Generated hashes use OWASP baseline ($m=47104, t=3, p=1$); configured hashes are bounded to $m=47104..65536$, $t=3..6$, $p=1..2$ and the exact tuple is advertised in `AuthChallenge`. |
 | **TLS Lifecycle** | ECDSA P-256 (Self-Signed) | 14-day lifetime, automatic live rotation with 4-day overlap |
-| **Memory Storage** | In-RAM Ring Buffer | Monotonic 64-bit sequence IDs, 72h TTL, 1 MB per payload |
+| **Memory Storage** | In-RAM Ring Buffer | Monotonic 64-bit sequence IDs, 72h TTL, max 10,000 messages, 64 MiB aggregate payload budget, 1 MB per payload |
 | **Management** | Three-Column TUI (`ratatui`) | Telemetry dashboard, ASCII TOFU QR, live session monitor |
 
 ---
@@ -55,10 +55,15 @@ Key design points:
   restricted DACL (Windows).
 - **TOFU:** QR code with `impulse-cert:<sha256>`; clients pin
   `serverCertificateHashes`. Rotation is announced via `NewCertHash` (0x22).
-- **Storage:** in-RAM ring buffer, 72h TTL, capped at `10_000` messages and `1 MB`
-  per payload.
-- **Relay:** broadcast + `Sync { last_seen_id }` catch-up (≤ 2000 msgs); key
-  exchanges replayed to late joiners.
+- **Storage:** in-RAM ring buffer, 72h TTL, capped at `10_000` messages and
+  **64 MiB aggregate payload bytes** (record/container overhead is additional),
+  with a 1 MB per-payload limit.
+- **Relay:** broadcast + `Sync { last_seen_id }` catch-up in bounded pages of at
+  most 499 messages and 4 MiB per `SyncResponse`; up to 16 Sync operations and
+  16 encoded response frames are admitted concurrently (64 MiB maximum encoded
+  Sync frames in flight). Sync operation and response write/flush each have a
+  30 s deadline. Key-exchange replay is capped at 16 packets / 64 KiB per
+  session and cleared on disconnect.
 - **Admin:** responsive **three-column TUI** — Info/QR/Cert | Users + Sessions |
   Logs — with live user stats, log filters, search, and QR focus.
 
@@ -107,7 +112,7 @@ with `--init`, `--password-hash <hash>`, or `server.password_hash` in `config.to
 
 ### Requirements
 
-- **Rust 1.85+** (edition 2024) to build from source.
+- **Rust 1.88+** (edition 2024) to build from source.
 - A **UDP-reachable** port (QUIC runs over UDP). Open/forward it in firewalls /
   security groups.
 - **Root/administrator is NOT required** — bind a high port (e.g. `4433`) instead
@@ -152,7 +157,7 @@ sudo systemctl enable --now impulse-server
 ### Docker
 
 ```dockerfile
-FROM rust:1.85-slim AS builder
+FROM rust:1.88-slim AS builder
 WORKDIR /app
 COPY . .
 RUN cargo build --release
@@ -260,11 +265,15 @@ followed by `len` bytes.
 
 The authoritative list is the `Opcode` enum in `src/protocol.rs`; it MUST stay in sync with the client's `transport/Protocol.kt`. Unknown/invalid client opcodes close the connection.
 
-Unknown/invalid client opcodes close the connection. Idle streams close after
-300 s. Sessions are capped at 1024 (unique `AtomicU64` ids); the aggregate buffer
-is capped at 512 MB; payloads over 1 MB are dropped; a single `Sync` returns at
-most 2000 messages. The parser validates declared packet length against the 1 MB
-limit before allocating, preventing CPU-DoS via inflated length prefixes.
+Unknown/invalid client opcodes close the connection. A client stream must open
+within 15 s; unauthenticated challenge/auth processing has an absolute 30 s
+deadline; authenticated idle streams close after 300 s. Sessions are capped at
+1024 with a per-IP admission limit of 10 connections / 10 s. An incomplete
+stream buffer is capped at 8 MiB per session, with a 512 MiB aggregate budget
+across reader buffers (not a total-process-memory cap). Sync admission and each
+response write/flush are bounded to 30 s; each response is at most 4 MiB and
+499 messages. The parser validates declared packet length against the 1 MB
+payload limit before allocating, preventing CPU-DoS via inflated length prefixes.
 
 ## Security
 
@@ -274,7 +283,9 @@ limit before allocating, preventing CPU-DoS via inflated length prefixes.
 - TOFU fingerprint pinning via QR code + `NewCertHash`.
 - Hybrid post-quantum TLS negotiation has not been verified in the runtime/test evidence.
 - Encrypted message bodies are not decrypted by the relay; outer identifiers and timing are visible, and packets are broadcast.
-- Ephemeral RAM-only storage, 72h TTL, bounded ring buffer and payload size.
+- Ephemeral RAM-only storage, 72h TTL, at most 10,000 messages and 64 MiB
+  aggregate retained payload bytes (container overhead is additional); 1 MB
+  maximum payload.
 - Passwords stored as Argon2id hashes; constant-time HMAC comparison.
 - Per-IP rate limiting (10 connections / 10 s) and session caps against DoS.
 - Idle sessions closed after 300 s.
@@ -291,7 +302,7 @@ active writers. Logs roll daily in `logs/` with 7-day retention.
 ```
 src/
   cert/        — ECDSA P-256 cert generation, rotation, TOFU fingerprint, FS persist
-  storage/     — ephemeral in-RAM message log (TTL 72h, sequence ids)
+  storage/     — ephemeral in-RAM message log (TTL 72h, 10,000 entries / 64 MiB payload budget)
   protocol.rs  — binary wire frames; framing/limits live in protocol/
   relay/       — WebTransport endpoint, session handling, auth and broadcast relay
   ui/          — terminal UI: Server/Users/Sessions panels, logs, TOFU QR and live stats

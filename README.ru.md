@@ -8,7 +8,7 @@
 
 [English](README.md) | [**Русский**](README.ru.md)
 
-[![Rust](https://img.shields.io/badge/Rust-1.85%2B-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/Rust-1.88%2B-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Transport](https://img.shields.io/badge/Transport-WebTransport%20%2F%20QUIC-00E5FF)](https://w3c.github.io/webtransport/)
 [![Security](https://img.shields.io/badge/Security-Encrypted%20Content%20Relay-22c55e)](#безопасность)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -29,9 +29,9 @@
 | :--- | :--- | :--- |
 | **Сетевой стек** | `wtransport` 0.7 (QUIC / TLS 1.3) | Единый UDP-порт (по умолчанию 4433), Dual-Stack IPv4/IPv6 (`[::]:4433`, fallback на `0.0.0.0:4433`), миграция соединений |
 | **Приватность релея** | Релей зашифрованного содержимого | Тела сообщений непрозрачны; внешние идентификаторы видимы; пакеты рассылаются подключённым клиентам |
-| **Аутентификация** | Argon2id + HMAC-SHA-256 | OWASP параметры ($m=47104, t=3, p=1$), проверка в constant time |
+| **Аутентификация** | Argon2id v19 + HMAC-SHA-256 | Для генерируемых хэшей — базовые OWASP параметры ($m=47104, t=3, p=1$); допустимые параметры конфигурации ограничены диапазонами $m=47104..65536$, $t=3..6$, $p=1..2$ и передаются клиенту в `AuthChallenge`. |
 | **TLS-сертификаты** | ECDSA P-256 (самоподписанные) | Срок действия 14 дней, авто-ротация на лету с перекрытием 4 дня |
-| **Хранение сообщений**| Кольцевой буфер в RAM | Монотонные 64-битные sequence ID, TTL 72 ч, лимит 1 МБ на фрейм |
+| **Хранение сообщений**| Кольцевой буфер в RAM | Монотонные 64-битные sequence ID, TTL 72 ч, не более 10 000 сообщений, суммарно 64 МиБ payload, не более 1 МБ на payload |
 | **Управление** | Трёхколоночный TUI (`ratatui`) | Дашборд телеметрии, ASCII QR для TOFU, монитор сессий |
 
 ---
@@ -51,14 +51,17 @@ Impulse — исследовательский relay-прототип для з�
 - **Аутентификация:** `AuthChallenge` (0x11) с 16-байтным nonce, Argon2id-солью и параметрами →
   клиент отвечает HMAC-SHA-256 (`Auth`, 0x12) → проверка в constant time.
 - **TLS / Сертификаты:** самоподписанные **ECDSA P-256**, срок **14 дней**,
-  автоматическая ротация с **2-дневным окном перекрытия**. PEM сохраняется с
+  автоматическая ротация с **4-дневным окном перекрытия**. PEM сохраняется с
   правами `0600` (Unix) / эксклюзивным DACL (Windows).
 - **TOFU:** QR-код с `impulse-cert:<sha256>`; клиенты закрепляют
   `serverCertificateHashes`. Ротация анонсируется через `NewCertHash` (0x22).
 - **Хранилище:** in-RAM ring buffer, TTL 72 ч, ограничение `10_000` сообщений и
-  `1 MB` на сообщение.
-- **Relay:** broadcast + догонка через `Sync { last_seen_id }` (≤ 2000 сообщений);
-  ключевые обмены replay'ятся новым клиентам.
+  **64 МиБ суммарно по payload** (overhead записей не включён), `1 MB` на payload.
+- **Relay:** broadcast + bounded paging `Sync { last_seen_id }` — до 499 сообщений
+  и 4 МиБ на `SyncResponse`; одновременно допускается 16 Sync и 16 буферизованных
+  encoded frames (максимум 64 МиБ encoded Sync frames в работе). Для Sync и
+  write/flush каждого ответа установлен deadline 30 с. Replay key exchange
+  ограничен 16 пакетами / 64 КиБ на сессию; кеш удаляется при disconnect.
 - **Администрирование:** адаптивная **трёхколоночная TUI** — Info/QR/Cert |
   Users + Sessions | Logs — с живой статистикой пользователей, фильтрами логов,
   поиском и фокусом на QR.
@@ -109,7 +112,7 @@ CLI-флаги всегда переопределяют конфиг; `--licens
 
 ### Требования
 
-- **Rust 1.85+** (edition 2024) для сборки из исходников.
+- **Rust 1.88+** (edition 2024) для сборки из исходников.
 - **Доступный по UDP** порт (QUIC работает поверх UDP). Откройте/пробросьте его
   в фаерволе / security groups.
 - **Root/administrator НЕ требуется** — используйте высокий порт (например,
@@ -154,7 +157,7 @@ sudo systemctl enable --now impulse-server
 ### Docker
 
 ```dockerfile
-FROM rust:1.85-slim AS builder
+FROM rust:1.88-slim AS builder
 WORKDIR /app
 COPY . .
 RUN cargo build --release
@@ -260,11 +263,14 @@ x86_64, x86 + universal). JVM unit-тесты проходят; on-device/instru
 | `0x34` | Data | S→C | SyncResponse | `u32` count, затем для каждого сообщения: `u64 id`, `u64 ts`, `len`-prefixed payload |
 
 Авторитетный список — enum `Opcode` в `src/protocol.rs`; он ОБЯЗАН оставаться синхронизированным с `transport/Protocol.kt` клиента. Неизвестные/невалидные опкоды от клиента закрывают соединение.
-стримы закрываются через 300 с. Сессии лимитированы 1024 (уникальные
-`AtomicU64` id); агрегатный буфер ограничен 512 МБ; полезные нагрузки более
-1 MB отбрасываются; один `Sync` возвращает не более 2000 сообщений. Парсер
-валидирует заявленную длину пакета против лимита в 1 MB до любой аллокации,
-предотвращая CPU-DoS через раздутые length-префиксы.
+клиент обязан открыть stream за 15 с; challenge/auth без аутентификации имеют
+абсолютный дедлайн 30 с; аутентифицированный idle stream закрывается через
+300 с. Одновременно допускается до 1024 сессий; IP ограничен 10 подключениями
+за 10 с. Буфер незавершённого входящего фрейма ограничен 8 МиБ на сессию,
+суммарный budget reader buffers — 512 МиБ (это не лимит всей памяти процесса).
+Операция Sync и write/flush каждого ответа ограничены 30 с; один ответ не больше
+4 МиБ и 499 сообщений. Парсер проверяет длину payload до аллокации, предотвращая
+DoS раздутыми length-префиксами.
 
 ## Безопасность
 
@@ -275,7 +281,9 @@ x86_64, x86 + universal). JVM unit-тесты проходят; on-device/instru
 - TOFU pinning отпечатка через QR-код + `NewCertHash`.
 - Согласование гибридного постквантового TLS в runtime и тестовых материалах не верифицировано.
 - Тела сообщений не расшифровываются релеем; внешние идентификаторы и время видимы, пакеты рассылаются подключённым клиентам.
-- Эфемерное RAM-only хранилище, TTL 72 ч, ограниченный ring buffer и размер payload.
+- Эфемерное RAM-only хранилище, TTL 72 ч, максимум 10 000 сообщений и 64 МиБ
+  суммарных retained payload bytes (overhead контейнеров учитывается отдельно);
+  лимит одного payload — 1 МБ.
 - Пароли хранятся как Argon2id-хэши; сравнение HMAC в constant time.
 - Per-IP rate limiting (10 соединений / 10 с) и лимит сессий против DoS.
 - Неактивные сессии закрываются через 300 с.
@@ -293,7 +301,7 @@ x86_64, x86 + universal). JVM unit-тесты проходят; on-device/instru
 ```
 src/
   cert/        — генерация ECDSA P-256 сертификатов, ротация, TOFU отпечаток, FS персист
-  storage/     — эфемерный in-RAM лог сообщений (TTL 72ч, sequence ids)
+  storage/     — эфемерный in-RAM лог (TTL 72ч, 10 000 записей / 64 МиБ payload)
   protocol.rs  — бинарные wire-фреймы; framing/limits находятся в protocol/
   relay/       — WebTransport эндпойнт, обработка сессий, auth и broadcast relay
   ui/          — терминальный UI: панели Server/Users/Sessions, логи, TOFU QR и live stats
