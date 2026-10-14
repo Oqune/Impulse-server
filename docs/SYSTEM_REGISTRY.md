@@ -145,3 +145,5 @@ TTL задаёт максимальный возраст, а count/byte caps м�
    - `client/README.md` и `client/README.ru.md`
    - Поддерживаемые технические документы и новые публикационные копии. Не перезаписывать исходные школьные DOCX или видеоисточники при синхронизации фактов: создавать новую редакцию и помечать старую как архивную только по отдельному решению владельца.
 6. Зафиксировать изменения атомарными Conventional Commits.
+
+Release receipt14Oct2026: Clientv3.2.1 / Serverv3.1.1 published after CI and asset checks. All authenticated relay handlers have a30s per-operation deadline; normal active session lifetime is unrestricted by the client setup timer. Detailed runtime limits and final paired evidence: docs/audit/2026-10-14-defense-readiness.md.

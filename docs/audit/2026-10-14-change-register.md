@@ -22,3 +22,5 @@ All changes preserve Wire v3 opcodes/layout and cryptographic minimums. No sourc
 Project-local skills were searched for and none found. Global personal skills were not edited. Original school DOCX/video hash preservation and a separate school report document discrepancies without silently rewriting submitted material. No personal video, passwords, PHC from local configuration, keystore, certificate key or local test logs are committed.
 
 - c552d85: bound every authenticated relay packet operation to30s, including backpressured heartbeat response; independent locked gates and rebuilt paired emulator runtime PASS. Existing20min soak precedes this final guard.
+
+- Publication completed: Client v3.2.1 (5 signed APKs), Server v3.1.1 (6 archives,4 DEB/RPM); signed tags and preserved signed commits in master. Release CI and artifact checks passed; runtime/production coverage limits retained.

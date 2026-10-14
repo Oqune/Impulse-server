@@ -10,7 +10,7 @@ tags:
   - webtransport
   - quic
 status: research-prototype
-version: "Latest tags: Client v3.2.0 / Server v3.1.0; working candidates: Client v3.2.1 / Server v3.1.1 (Protocol v3, pending gates)"
+version: "Published Client v3.2.1 / Server v3.1.1 (Protocol v3; verified release gates and assets, runtime limits documented)"
 updated: 2026-10-14
 ---
 
