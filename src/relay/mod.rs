@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use tokio::sync::{Semaphore, broadcast};
+use tokio::sync::{Semaphore, broadcast, watch};
 use tracing::{debug, info, warn};
 use wtransport::endpoint::endpoint_side;
 use wtransport::{Endpoint, ServerConfig};
@@ -51,10 +51,86 @@ const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Maximum number of concurrent sessions. Beyond this, new sessions are
 /// rejected to protect against resource exhaustion (DoS).
 const MAX_CONCURRENT_SESSIONS: usize = 1024;
+/// Bound concurrent Sync page construction and outbound frame buffering.
+const MAX_CONCURRENT_SYNCS: usize = 16;
+/// One permit reserves room for a full 4 MiB Sync frame and is carried through
+/// its queued/writer lifetime, not released when the producer sends it.
+const MAX_BUFFERED_SYNC_FRAMES: usize = 16;
 
-/// Max number of messages returned by a single `Sync` (C3). Late joiners get at
-/// most this many; they should issue further `Sync` calls to catch up.
-const MAX_SYNC_MESSAGES: usize = 2000;
+pub(crate) struct DirectResponse {
+    pub(crate) packet: Vec<u8>,
+    _sync_budget: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl DirectResponse {
+    pub(crate) fn plain(packet: Vec<u8>) -> Self {
+        Self { packet, _sync_budget: None }
+    }
+
+    pub(crate) fn sync(packet: Vec<u8>, permit: tokio::sync::OwnedSemaphorePermit) -> Self {
+        Self { packet, _sync_budget: Some(permit) }
+    }
+
+    pub(crate) fn is_sync(&self) -> bool {
+        self._sync_budget.is_some()
+    }
+}
+
+/// Each SyncResponse stays below client accumulator limits; server continues
+/// paging through the request's fixed high-water mark.
+pub(crate) const MAX_SYNC_FRAME_MESSAGES: usize = 499;
+
+/// Per-session replay cache bounds for opaque key-exchange packets.
+const MAX_KEYEXCHANGE_PACKETS_PER_SESSION: usize = 16;
+const MAX_KEYEXCHANGE_BYTES_PER_SESSION: usize = 64 * 1024;
+
+#[derive(Default)]
+struct KeyExchangeCache {
+    packets: std::collections::VecDeque<Vec<u8>>,
+    bytes: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct KeyExchangeStore {
+    sessions: DashMap<u64, KeyExchangeCache>,
+}
+
+impl KeyExchangeStore {
+    pub(crate) fn insert(&self, session: u64, packet: Vec<u8>) {
+        if packet.len() > MAX_KEYEXCHANGE_BYTES_PER_SESSION {
+            return;
+        }
+        let mut cache = self.sessions.entry(session).or_default();
+        while cache.packets.len() >= MAX_KEYEXCHANGE_PACKETS_PER_SESSION
+            || cache.bytes.saturating_add(packet.len()) > MAX_KEYEXCHANGE_BYTES_PER_SESSION
+        {
+            if let Some(oldest) = cache.packets.pop_front() {
+                cache.bytes = cache.bytes.saturating_sub(oldest.len());
+            } else {
+                break;
+            }
+        }
+        cache.bytes += packet.len();
+        cache.packets.push_back(packet);
+    }
+
+    pub(crate) fn session_keys_except(&self, excluded: u64) -> Vec<u64> {
+        self.sessions.iter().map(|entry| *entry.key()).filter(|key| *key != excluded).collect()
+    }
+
+    pub(crate) fn packets_for(&self, session: u64) -> Vec<Vec<u8>> {
+        self.sessions.get(&session).map(|cache| cache.packets.iter().cloned().collect()).unwrap_or_default()
+    }
+
+    pub(crate) fn remove(&self, session: u64) {
+        self.sessions.remove(&session);
+    }
+}
+
+async fn forward_shutdown(shutdown: Arc<tokio::sync::Notify>, cancel: watch::Sender<bool>) {
+    shutdown.notified().await;
+    cancel.send_replace(true);
+}
 
 /// Max connections per IP within the rate-limit window.
 const MAX_CONNECTIONS_PER_IP: usize = 10;
@@ -102,6 +178,8 @@ pub struct RelayServer {
     endpoint6: Arc<tokio::sync::Mutex<Option<wtransport::Endpoint<endpoint_side::Server>>>>,
     /// Bounds the number of concurrent sessions to protect against DoS (see E4).
     session_semaphore: Arc<Semaphore>,
+    sync_semaphore: Arc<Semaphore>,
+    sync_frame_semaphore: Arc<Semaphore>,
     /// Per-IP rate limiter (connection attempts within sliding window).
     ip_connections: Arc<tokio::sync::Mutex<HashMap<IpAddr, Vec<Instant>>>>,
     /// Per-session auth challenge nonces (session_id -> (nonce, created_at)).
@@ -111,12 +189,14 @@ pub struct RelayServer {
     tui: TuiHandle,
     /// Password hash for authentication (SHA-256 hex).
     password_hash: String,
+    /// Validated parameters used to advertise the configured hash's exact KDF tuple.
+    auth_hash_params: crate::crypto::AuthHashParameters,
     /// Atomic counter for unique session keys (wtransport session_id returns 0 for all connections).
     next_session_id: Arc<AtomicU64>,
     /// Live counters shared with the TUI (spec §3 "Atomics shared with the relay").
     stats: Arc<ServerStats>,
     /// Stored key exchange packets per session, replayed to newly authenticated peers.
-    key_exchange_store: Arc<DashMap<u64, Vec<Vec<u8>>>>,
+    key_exchange_store: Arc<KeyExchangeStore>,
     /// Ephemeral user registry (spec: user system) keyed by public-key hash.
     users: Arc<users::UserRegistry>,
     /// Maximum age of a challenge nonce before it is discarded.
@@ -129,6 +209,7 @@ impl RelayServer {
         cert_manager: Arc<tokio::sync::Mutex<CertManager>>,
         tui: TuiHandle,
     ) -> anyhow::Result<Self> {
+        let auth_hash_params = crate::crypto::validate_auth_hash(&config.password_hash)?;
         let cert_manager = cert_manager.clone();
         let (tls_config, cert_resolver) = {
             let cm = cert_manager.lock().await;
@@ -180,14 +261,17 @@ impl RelayServer {
             endpoint: Arc::new(tokio::sync::Mutex::new(Some(endpoint))),
             endpoint6: Arc::new(tokio::sync::Mutex::new(endpoint6)),
             session_semaphore,
+            sync_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_SYNCS)),
+            sync_frame_semaphore: Arc::new(Semaphore::new(MAX_BUFFERED_SYNC_FRAMES)),
             ip_connections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             auth_nonces: Arc::new(DashMap::new()),
             auth_attempts: Arc::new(DashMap::new()),
             tui: tui.clone(),
             password_hash: config.password_hash.clone(),
+            auth_hash_params,
             next_session_id: Arc::new(AtomicU64::new(0)),
             stats,
-            key_exchange_store: Arc::new(DashMap::new()),
+            key_exchange_store: Arc::new(KeyExchangeStore::default()),
             users: Arc::new(users::UserRegistry::new()),
             nonce_max_age: NONCE_MAX_AGE,
         };
@@ -243,17 +327,22 @@ impl RelayServer {
                 .fingerprint_grouped()
         );
 
-        // Run IPv4 accept loop; optionally run IPv6 in parallel.
+        // Bridge the public Notify API to a broadcast watch signal. A single
+        // notify_one/notify_waiters wakeup cancels both dual-stack accept loops.
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let bridge = tokio::spawn(forward_shutdown(shutdown, cancel_tx));
         if let Some(server6) = server6 {
             let self2 = self.clone();
-            let shutdown2 = shutdown.clone();
+            let cancel_rx2 = cancel_rx.clone();
             tokio::join!(
-                Self::accept_loop(self, server, shutdown),
-                Self::accept_loop(self2, server6, shutdown2),
+                Self::accept_loop(self, server, cancel_rx),
+                Self::accept_loop(self2, server6, cancel_rx2),
             );
         } else {
-            Self::accept_loop(self, server, shutdown).await;
+            Self::accept_loop(self, server, cancel_rx).await;
         }
+        bridge.abort();
+        let _ = bridge.await;
 
         Ok(())
     }
@@ -261,9 +350,12 @@ impl RelayServer {
     async fn accept_loop(
         self: Arc<Self>,
         server: wtransport::Endpoint<endpoint_side::Server>,
-        shutdown: std::sync::Arc<tokio::sync::Notify>,
+        mut cancelled: watch::Receiver<bool>,
     ) {
         loop {
+            if *cancelled.borrow() {
+                break;
+            }
             #[allow(clippy::large_enum_variant)]
             enum Next {
                 Session(wtransport::endpoint::IncomingSession),
@@ -271,7 +363,10 @@ impl RelayServer {
             }
             let next = tokio::select! {
                 incoming_session = server.accept() => Next::Session(incoming_session),
-                () = shutdown.notified() => Next::Shutdown,
+                changed = cancelled.changed() => {
+                    let _ = changed;
+                    Next::Shutdown
+                },
             };
             match next {
                 Next::Shutdown => {
@@ -414,5 +509,71 @@ impl RelayServer {
     /// Snapshot the user registry as rows for the TUI users panel.
     fn user_rows(&self) -> Vec<crate::ui::view::UserRow> {
         self.users.rows()
+    }
+}
+
+#[cfg(test)]
+mod resource_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn key_exchange_cache_evicts_oldest_within_count_and_byte_caps() {
+        let cache = KeyExchangeStore::default();
+        for n in 0..17u8 {
+            cache.insert(1, vec![n; 4096]);
+        }
+        let packets = cache.packets_for(1);
+        assert_eq!(packets.len(), MAX_KEYEXCHANGE_PACKETS_PER_SESSION);
+        assert_eq!(packets.first().unwrap()[0], 1);
+        assert!(packets.iter().map(Vec::len).sum::<usize>() <= MAX_KEYEXCHANGE_BYTES_PER_SESSION);
+
+        cache.insert(2, vec![9; MAX_KEYEXCHANGE_BYTES_PER_SESSION + 1]);
+        assert!(cache.packets_for(2).is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_notify_cancels_both_accept_loop_watchers() {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let (tx, mut rx1) = watch::channel(false);
+        let mut rx2 = rx1.clone();
+        let bridge = tokio::spawn(forward_shutdown(notify.clone(), tx));
+
+        notify.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let _ = tokio::join!(rx1.changed(), rx2.changed());
+        }).await.expect("single shutdown notification must fan out");
+        assert!(*rx1.borrow());
+        assert!(*rx2.borrow());
+        bridge.abort();
+    }
+
+    #[tokio::test]
+    async fn sync_frame_budget_lives_until_queued_response_is_dropped() {
+        let budget = Arc::new(Semaphore::new(1));
+        let permit = budget.clone().acquire_owned().await.unwrap();
+        let response = DirectResponse::sync(vec![0x34], permit);
+        assert_eq!(response.packet, [0x34]);
+        assert!(budget.clone().try_acquire_owned().is_err());
+        drop(response);
+        assert_eq!(budget.available_permits(), 1);
+
+        let permit = budget.clone().acquire_owned().await.unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        assert!(tx.send(DirectResponse::sync(vec![0x34], permit)).await.is_err());
+        assert_eq!(budget.available_permits(), 1, "send error drops the owned budget permit");
+
+        let task_budget = budget.clone();
+        let writer = tokio::spawn(async move {
+            let permit = task_budget.clone().acquire_owned().await.unwrap();
+            let _response = DirectResponse::sync(vec![0x34], permit);
+            std::future::pending::<()>().await;
+        });
+        while budget.available_permits() != 0 {
+            tokio::task::yield_now().await;
+        }
+        writer.abort();
+        let _ = writer.await;
+        assert_eq!(budget.available_permits(), 1, "aborting a disconnected writer releases its response permit");
     }
 }

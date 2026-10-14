@@ -6,7 +6,7 @@
 //! re-implemented with `common::server_verify_auth` / `derive_argon2_key`.
 //!
 //! Protocol:
-//!   Client sends: [0x01] [len:raw_password_bytes] [32 raw bytes: HMAC-SHA-256]
+//!   Client sends: [0x12] [u32 hmac_len=32] [32 raw bytes: HMAC-SHA-256]
 //!   HMAC key = Argon2id(password) output (32 bytes)
 //!   HMAC msg = server nonce (16 bytes)
 
@@ -15,10 +15,10 @@ mod common;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-use impulse_server::crypto::{argon2_hash, sha256_hex};
+use impulse_server::crypto::{argon2_hash, sha256_hex, validate_auth_hash};
 use impulse_server::protocol::{
-    Opcode, PacketReader, PacketWriter, ProtocolError, encode_auth_challenge, encode_auth_result,
-    encode_data, encode_heartbeat,
+    Opcode, PacketReader, PacketWriter, ProtocolError, encode_auth_challenge,
+    encode_auth_challenge_with_params, encode_auth_result, encode_data, encode_heartbeat,
 };
 use common::{assert_bytes_eq, build_client_auth, derive_argon2_key, server_verify_auth};
 
@@ -29,6 +29,43 @@ fn auth_packet_ok(packet: &[u8], stored_hash: &str, server_nonce: &[u8]) -> bool
     server_verify_auth(packet, stored_hash, server_nonce)
         .map(|(h, n)| h && n)
         .unwrap_or(false)
+}
+
+#[test]
+fn nondefault_validated_parameters_roundtrip_through_challenge_and_auth() {
+    use argon2::password_hash::{PasswordHasher, SaltString};
+
+    let password = "nondefault-params";
+    let salt = SaltString::encode_b64(b"0123456789abcdef").unwrap();
+    let params = argon2::Params::new(49_152, 4, 2, Some(32)).unwrap();
+    let hasher = argon2::Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        params,
+    );
+    let stored_hash = hasher
+        .hash_password(password.as_bytes(), &salt)
+        .unwrap()
+        .to_string();
+    let auth_params = validate_auth_hash(&stored_hash).unwrap();
+    let nonce: [u8; 16] = std::array::from_fn(|_| rand::random());
+
+    let challenge = encode_auth_challenge_with_params(
+        &nonce,
+        &auth_params.salt_b64,
+        auth_params.memory_kib,
+        auth_params.iterations,
+        auth_params.parallelism,
+    );
+    let mut reader = PacketReader::new(&challenge);
+    assert_eq!(reader.read_opcode().unwrap(), Opcode::AuthChallenge);
+    assert_eq!(reader.read_bytes(16).unwrap(), nonce);
+    assert_eq!(reader.read_len_prefixed().unwrap(), auth_params.salt_b64.as_bytes());
+    assert_eq!(reader.read_len_prefixed().unwrap(), b"m=49152,t=4,p=2");
+    assert!(reader.remaining().is_empty());
+
+    let client_auth = build_client_auth(password, &nonce, &stored_hash);
+    assert!(auth_packet_ok(&client_auth, &stored_hash, &nonce));
 }
 
 // ---------------------------------------------------------------------------

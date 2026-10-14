@@ -306,9 +306,8 @@ pub fn encode_new_cert_hash(hash: &[u8; 32], expires_at: u64) -> Vec<u8> {
     w.into_bytes()
 }
 
-/// Canonical Argon2id parameters (OWASP) the server enforces, transmitted in the
-/// `AuthChallenge` so the client derives its HMAC key from a single source of truth
-/// (SPEC N1). Format: `m=<m>,t=<t>,p=<p>` — a length-prefixed UTF-8 tag.
+/// Canonical Argon2id parameter tag used by the compatibility helper below.
+/// Runtime challenges use the exact validated tuple from server configuration.
 pub const AUTH_CHALLENGE_PARAMS_TAG: &[u8] = b"m=47104,t=3,p=1";
 
 /// Build an `AuthChallenge` packet (server→client).
@@ -318,10 +317,23 @@ pub const AUTH_CHALLENGE_PARAMS_TAG: &[u8] = b"m=47104,t=3,p=1";
 /// The trailing `m/t/p` tag carries the server's OWASP Argon2id parameters so the client
 /// derives its HMAC key from them instead of a frozen constant (kills the N1 lockstep mine).
 pub fn encode_auth_challenge(nonce: &[u8], argon2_salt_b64: &str) -> Vec<u8> {
+    encode_auth_challenge_with_params(nonce, argon2_salt_b64, 47_104, 3, 1)
+}
+
+/// Build an `AuthChallenge` using the exact validated Argon2id tuple from server config.
+/// The wire layout remains identical; only the existing parameter tag's text varies.
+pub fn encode_auth_challenge_with_params(
+    nonce: &[u8],
+    argon2_salt_b64: &str,
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
+) -> Vec<u8> {
     let mut w = PacketWriter::with_opcode(Opcode::AuthChallenge);
     w.buf.extend_from_slice(nonce);                      // 16 raw bytes
     w.write_len_prefixed(argon2_salt_b64.as_bytes());    // u32 + B64 salt string
-    w.write_len_prefixed(AUTH_CHALLENGE_PARAMS_TAG);     // u32 + "m=47104,t=3,p=1"
+    let params_tag = format!("m={memory_kib},t={iterations},p={parallelism}");
+    w.write_len_prefixed(params_tag.as_bytes());
     w.into_bytes()
 }
 
@@ -364,7 +376,8 @@ impl ServerPacketEncoder {
 #[cfg(test)]
 mod protocol_tests {
     use crate::protocol::{
-        Opcode, PacketReader, PacketWriter, ProtocolError, encode_auth_result, encode_data,
+        Opcode, PacketReader, PacketWriter, ProtocolError, encode_auth_challenge,
+        encode_auth_challenge_with_params, encode_auth_result, encode_data,
         encode_new_cert_hash, encode_sync_response,
     };
 
@@ -377,6 +390,26 @@ mod protocol_tests {
         let mut r = PacketReader::new(&bytes);
         assert_eq!(r.read_opcode().unwrap(), Opcode::Auth);
         assert_eq!(r.read_len_prefixed().unwrap(), b"secret");
+    }
+
+    #[test]
+    fn auth_challenge_parameterized_tag_preserves_wire_layout_and_default_helper() {
+        let nonce = [0x5a; 16];
+        let default = encode_auth_challenge(&nonce, "salt");
+        let mut reader = PacketReader::new(&default);
+        assert_eq!(reader.read_opcode().unwrap(), Opcode::AuthChallenge);
+        assert_eq!(reader.read_bytes(16).unwrap(), nonce);
+        assert_eq!(reader.read_len_prefixed().unwrap(), b"salt");
+        assert_eq!(reader.read_len_prefixed().unwrap(), b"m=47104,t=3,p=1");
+        assert!(reader.remaining().is_empty());
+
+        let custom = encode_auth_challenge_with_params(&nonce, "salt", 49_152, 4, 2);
+        let mut reader = PacketReader::new(&custom);
+        assert_eq!(reader.read_opcode().unwrap(), Opcode::AuthChallenge);
+        assert_eq!(reader.read_bytes(16).unwrap(), nonce);
+        assert_eq!(reader.read_len_prefixed().unwrap(), b"salt");
+        assert_eq!(reader.read_len_prefixed().unwrap(), b"m=49152,t=4,p=2");
+        assert!(reader.remaining().is_empty());
     }
 
     #[test]

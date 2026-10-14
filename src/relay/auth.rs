@@ -1,13 +1,13 @@
 //! Authentication handshake for WebTransport sessions.
 //!
 //! Protocol (SPEC C3, §4.2 — HMAC-only challenge response):
-//!   Client sends: [0x01] [u32 hmac_len=32] [32 raw bytes: HMAC-SHA-256]
+//!   Client sends: [0x12] [u32 hmac_len=32] [32 raw bytes: HMAC-SHA-256]
 //!   HMAC key   = Argon2id(stored_hash) output (32 bytes) — derived by the
 //!                server directly from the stored hash, so the password never
 //!                travels on the wire (C3).
 //!   HMAC msg   = server nonce (16 bytes)
 //! The nonce is single-use (C4): a successful verification consumes it, so a
-//! replayed 0x01 frame is rejected.
+//! replayed 0x12 frame is rejected.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -19,9 +19,9 @@ use sha2::Sha256;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::protocol::limits::MAX_PAYLOAD_BYTES;
+use crate::protocol::limits::{MAX_PAYLOAD_BYTES, MAX_SYNC_RESPONSE_BYTES};
 use crate::protocol::{Opcode, PacketReader, RelayedMessage, ServerPacketEncoder};
-use crate::relay::{MAX_AUTH_ATTEMPTS, MAX_SYNC_MESSAGES, RelayServer};
+use crate::relay::{DirectResponse, MAX_AUTH_ATTEMPTS, MAX_SYNC_FRAME_MESSAGES, RelayServer};
 use crate::relay::session::Session;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -107,7 +107,7 @@ pub(crate) async fn verify_auth(
     };
 
     if nonce_valid {
-        // C4 (§4): consume the nonce so a replayed 0x01 frame fails on second use.
+        // C4 (§4): consume the nonce so a replayed 0x12 Auth frame fails on second use.
         relay.auth_nonces.remove(&session.key);
         relay.stats.auth_ok.fetch_add(1, Ordering::Relaxed);
     } else {
@@ -125,7 +125,7 @@ pub(crate) async fn verify_auth(
 pub(crate) async fn process_packet(
     relay: &Arc<RelayServer>,
     session: &mut Session,
-    direct_tx: &mpsc::Sender<Vec<u8>>,
+    direct_tx: &mpsc::Sender<DirectResponse>,
     packet_data: &[u8],
 ) -> anyhow::Result<()> {
     let mut reader = PacketReader::new(packet_data);
@@ -135,7 +135,7 @@ pub(crate) async fn process_packet(
     match opcode {
         Opcode::Auth => {
             // C3 (§4.2): HMAC-only challenge response. Wire:
-            //   [0x01] [u32 hmac_len=32] [32 hmac_response]
+            //   [0x12] [u32 hmac_len=32] [32 hmac_response]
             // The password never travels on the wire; the server verifies the HMAC
             // against the key derived directly from the stored Argon2id hash (no password
             // needed). C4 (§4): skip re-auth for an already-authenticated session.
@@ -173,7 +173,7 @@ pub(crate) async fn process_packet(
                 if ok { None } else { Some("Invalid password or challenge") },
             );
             direct_tx
-                .send(response)
+                .send(DirectResponse::plain(response))
                 .await
                 .map_err(|_| anyhow::anyhow!("direct channel closed"))?;
 
@@ -194,13 +194,9 @@ pub(crate) async fn process_packet(
             // newly-authenticated client can send messages to peers that
             // connected before it.
             let mut replayed = 0u32;
-            for entry in relay.key_exchange_store.iter() {
-                let src = *entry.key();
-                if src == session_key {
-                    continue;
-                }
-                for packet in entry.value() {
-                    if let Err(e) = direct_tx.send(packet.clone()).await {
+            for src in relay.key_exchange_store.session_keys_except(session_key) {
+                for packet in relay.key_exchange_store.packets_for(src) {
+                    if let Err(e) = direct_tx.send(DirectResponse::plain(packet)).await {
                         warn!("[AUTH] Session {} failed to replay keyex from session {}: {}", session_key, src, e);
                     } else {
                         replayed += 1;
@@ -221,28 +217,70 @@ pub(crate) async fn process_packet(
                 warn!("[SYNC] Session {} REJECTED: not authenticated", session_key);
                 return Err(anyhow::anyhow!("not authenticated"));
             }
+            let _sync_permit = relay
+                .sync_semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| anyhow::anyhow!("sync service is shutting down"))?;
             let last_seen_id = reader.read_u64().map_err(|e| anyhow::anyhow!("{}", e))?;
             debug!(
                 "[SYNC] Session {} sync request last_seen_id={}",
                 session_key, last_seen_id
             );
 
-            let replay = relay.store.since(last_seen_id, MAX_SYNC_MESSAGES);
-            let messages: Vec<(u64, u64, Vec<u8>)> = replay
-                .into_iter()
-                .map(|m| (m.id, m.timestamp, m.payload))
-                .collect();
-            debug!(
-                "[SYNC] Session {} returning {} messages",
-                session_key,
-                messages.len()
-            );
-
-            let response = ServerPacketEncoder::sync_response(&messages);
-            direct_tx
-                .send(response)
-                .await
-                .map_err(|_| anyhow::anyhow!("direct channel closed"))?;
+            let through_id = relay.store.latest_id();
+            let mut cursor = last_seen_id;
+            let mut total = 0usize;
+            loop {
+                // Reserve a global frame slot before cloning retained payloads
+                // or encoding; the permit travels with the response until the
+                // writer flushes it or the session drops the response.
+                let frame_permit = relay
+                    .sync_frame_semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("sync frame service is shutting down"))?;
+                let page = relay.store.since_bounded(
+                    cursor,
+                    through_id,
+                    MAX_SYNC_FRAME_MESSAGES,
+                    MAX_SYNC_RESPONSE_BYTES,
+                );
+                if page.is_empty() {
+                    break;
+                }
+                let next_cursor = page.last().expect("nonempty page").id;
+                let messages: Vec<(u64, u64, Vec<u8>)> = page
+                    .into_iter()
+                    .map(|m| (m.id, m.timestamp, m.payload))
+                    .collect();
+                let response = ServerPacketEncoder::sync_response(&messages);
+                if response.len() > MAX_SYNC_RESPONSE_BYTES {
+                    return Err(anyhow::anyhow!("bounded SyncResponse exceeded byte cap"));
+                }
+                cursor = next_cursor;
+                total += messages.len();
+                direct_tx
+                    .send(DirectResponse::sync(response, frame_permit))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("direct channel closed"))?;
+            }
+            if total == 0 {
+                let frame_permit = relay
+                    .sync_frame_semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("sync frame service is shutting down"))?;
+                let response = ServerPacketEncoder::sync_response(&[]);
+                direct_tx
+                    .send(DirectResponse::sync(response, frame_permit))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("direct channel closed"))?;
+            }
+            debug!("[SYNC] Session {} streamed {} messages through id {}", session_key, total, through_id);
             Ok(())
         }
         Opcode::Data => {
@@ -307,7 +345,7 @@ pub(crate) async fn process_packet(
             );
             let response = ServerPacketEncoder::heartbeat(client_ts);
             direct_tx
-                .send(response)
+                .send(DirectResponse::plain(response))
                 .await
                 .map_err(|_| anyhow::anyhow!("direct channel closed"))?;
             Ok(())
@@ -336,10 +374,7 @@ pub(crate) async fn process_packet(
             let _ = relay
                 .keyexchange_tx
                 .send((session_key, packet.clone()));
-            relay.key_exchange_store
-                .entry(session_key)
-                .or_default()
-                .push(packet);
+            relay.key_exchange_store.insert(session_key, packet);
             debug!("[KEYEX] Session {} relayed combined KEM+DSA to all peers", session_key);
             // Derive the user identity from the KEM public key (no wire change).
             // First 0x31 of a session binds it to the user; a re-sent 0x31

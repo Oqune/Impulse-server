@@ -1,12 +1,11 @@
 //! Ephemeral, in-memory message storage.
 //!
 //! Messages are kept only in RAM (no persistence) and expire after a TTL of
-//! 24 hours. Each message carries:
-//!   * a monotonically increasing `u64` sequence id,
-//!   * the opaque encrypted payload (produced end-to-end by the clients),
-//!   * a creation timestamp.
+//! 72 hours. Each record carries a monotonically increasing `u64` sequence id,
+//! the opaque client payload, and a server timestamp. The payload may include
+//! client-defined routing identifiers; the relay does not parse it as metadata.
 //!
-//! A bounded ring buffer (by count) plus a TTL sweep bounds memory usage.
+//! Count and payload-byte caps plus a TTL sweep bound retained storage.
 
 use dashmap::DashMap;
 use std::collections::VecDeque;
@@ -21,12 +20,16 @@ pub const MESSAGE_TTL: Duration = Duration::from_secs(60 * 60 * 72); // 72 hours
 /// Hard cap on the number of retained messages (ring-buffer behaviour).
 pub const MAX_MESSAGES: usize = 10_000;
 
-/// A single relayed message. The payload is already end-to-end encrypted by the
-/// client; the server only stores and forwards it. No sender metadata is kept.
+/// Maximum total opaque payload bytes retained for reconnect synchronization.
+pub const MAX_STORE_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
+
+/// A single relayed message. The server stores/forwards the payload opaquely and
+/// keeps no separately parsed sender metadata; client payloads can contain
+/// application-defined routing identifiers visible to the relay.
 #[derive(Clone, Debug)]
 pub struct StoredMessage {
     pub id: u64,
-    /// Encrypted payload bytes (client-side encryption).
+    /// Opaque client-defined payload bytes.
     pub payload: Vec<u8>,
     /// Unix millis at creation.
     pub timestamp: u64,
@@ -45,8 +48,10 @@ fn lock_order(mutex: &std::sync::Mutex<VecDeque<u64>>) -> std::sync::MutexGuard<
 pub struct MessageStore {
     inner: DashMap<u64, StoredMessage>,
     next_id: AtomicU64,
-    /// Ordered list of ids, used to implement the ring-buffer cap and TTL sweep.
+    /// Ordered list of ids, used for count/byte eviction and TTL sweep.
     order: std::sync::Mutex<VecDeque<u64>>,
+    /// Sum of retained payload sizes. Mutations happen while `order` is locked.
+    retained_bytes: std::sync::atomic::AtomicUsize,
 }
 
 impl MessageStore {
@@ -55,6 +60,7 @@ impl MessageStore {
             inner: DashMap::new(),
             next_id: AtomicU64::new(1),
             order: std::sync::Mutex::new(VecDeque::with_capacity(MAX_MESSAGES)),
+            retained_bytes: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -86,14 +92,18 @@ impl MessageStore {
         // records via `since()`, so the payload must live in the map.
         self.inner.insert(id, msg.clone());
         order.push_back(id);
-        while order.len() > MAX_MESSAGES {
+        let mut retained = self.retained_bytes.load(Ordering::Relaxed) + msg.payload.len();
+        while order.len() > MAX_MESSAGES || retained > MAX_STORE_BYTES {
             if let Some(oldest) = order.front().copied() {
                 order.pop_front();
-                self.inner.remove(&oldest);
+                if let Some((_, removed)) = self.inner.remove(&oldest) {
+                    retained = retained.saturating_sub(removed.payload.len());
+                }
             } else {
                 break;
             }
         }
+        self.retained_bytes.store(retained, Ordering::Relaxed);
         msg
     }
 
@@ -115,6 +125,50 @@ impl MessageStore {
             .filter_map(|id| self.inner.get(id).map(|r| r.clone()))
             .collect()
     }
+
+    /// Snapshot a bounded page through `through_id`, accounting for the full
+    /// encoded-record overhead. The caller can advance from the last returned
+    /// id without allocating or encoding an unbounded backlog at once.
+    pub fn since_bounded(
+        &self,
+        after_id: u64,
+        through_id: u64,
+        max_count: usize,
+        max_encoded_bytes: usize,
+    ) -> Vec<StoredMessage> {
+        const RESPONSE_HEADER_BYTES: usize = 5; // opcode + u32 count
+        const RECORD_HEADER_BYTES: usize = 20; // id + timestamp + u32 payload length
+
+        if max_count == 0 || max_encoded_bytes < RESPONSE_HEADER_BYTES {
+            return Vec::new();
+        }
+        let mut selected = Vec::new();
+        let mut encoded_bytes = RESPONSE_HEADER_BYTES;
+        let order = lock_order(&self.order);
+        for id in order.iter().copied().filter(|id| *id > after_id && *id <= through_id) {
+            let Some(message) = self.inner.get(&id) else { continue };
+            let record_bytes = RECORD_HEADER_BYTES.saturating_add(message.payload.len());
+            if selected.len() >= max_count
+                || encoded_bytes.saturating_add(record_bytes) > max_encoded_bytes
+            {
+                break;
+            }
+            encoded_bytes += record_bytes;
+            selected.push(message.clone());
+        }
+        selected
+    }
+
+    /// Highest sequence id allocated so far, used to make Sync finite even
+    /// while new messages arrive concurrently.
+    pub fn latest_id(&self) -> u64 {
+        self.next_id.load(Ordering::Relaxed).saturating_sub(1)
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        self.retained_bytes.load(Ordering::Relaxed)
+    }
+
     /// Remove messages older than the TTL. Called periodically.
     pub fn sweep(&self) -> usize {
         let now = SystemTime::now()
@@ -129,13 +183,18 @@ impl MessageStore {
                 to_remove.push(*entry.key());
             }
         }
-        let removed = to_remove.len();
+        let mut order = lock_order(&self.order);
+        let mut removed = 0;
+        let mut removed_bytes = 0usize;
         for id in to_remove {
-            self.inner.remove(&id);
+            if let Some((_, message)) = self.inner.remove(&id) {
+                removed += 1;
+                removed_bytes = removed_bytes.saturating_add(message.payload.len());
+            }
         }
         if removed > 0 {
-            let mut order = lock_order(&self.order);
             order.retain(|id| self.inner.contains_key(id));
+            self.retained_bytes.fetch_sub(removed_bytes, Ordering::Relaxed);
         }
         removed
     }
@@ -194,6 +253,7 @@ mod tests {
         let removed = store.sweep();
         assert_eq!(removed, 1, "only the expired message should be removed");
         assert_eq!(store.len(), 2, "two messages should remain");
+        assert_eq!(store.retained_bytes(), b"alive".len() + b"fresh".len());
 
         let remaining = store.since(0, 10);
         let payloads: Vec<&[u8]> = remaining.iter().map(|m| m.payload.as_slice()).collect();
@@ -209,5 +269,57 @@ mod tests {
             !payloads.contains(&b"dead".as_slice()),
             "dead should have been swept, got: {payloads:?}"
         );
+    }
+
+    #[test]
+    fn store_byte_budget_evicts_oldest_and_tracks_exact_retained_bytes() {
+        let store = MessageStore::new();
+        let payload = vec![7; 1024 * 1024];
+        for _ in 0..=MAX_STORE_BYTES / payload.len() {
+            store.push(payload.clone());
+        }
+        assert_eq!(store.retained_bytes(), MAX_STORE_BYTES);
+        assert_eq!(store.len(), MAX_STORE_BYTES / payload.len());
+        assert_eq!(store.since(0, 1)[0].id, 2, "oldest record is evicted first");
+    }
+
+    #[test]
+    fn store_count_budget_remains_ten_thousand() {
+        let store = MessageStore::new();
+        for _ in 0..=MAX_MESSAGES {
+            store.push(vec![1]);
+        }
+        assert_eq!(store.len(), MAX_MESSAGES);
+        assert_eq!(store.since(0, 1)[0].id, 2);
+        assert_eq!(store.retained_bytes(), MAX_MESSAGES);
+    }
+
+    #[test]
+    fn bounded_sync_pages_obey_count_bytes_and_high_water_mark() {
+        let store = MessageStore::new();
+        for n in 0..10u8 {
+            store.push(vec![n; 32]);
+        }
+        let high_water = store.latest_id();
+        store.push(vec![99; 32]);
+
+        let page = store.since_bounded(0, high_water, 3, 5 + 2 * (20 + 32));
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].id, 1);
+        assert_eq!(page[1].id, 2);
+        assert!(page.last().unwrap().id < store.latest_id());
+        assert!(store.since_bounded(2, high_water, 3, 5 + 20).is_empty());
+
+        let mut cursor = 0;
+        let mut ids = Vec::new();
+        loop {
+            let page = store.since_bounded(cursor, high_water, 3, 5 + 2 * (20 + 32));
+            if page.is_empty() {
+                break;
+            }
+            cursor = page.last().unwrap().id;
+            ids.extend(page.into_iter().map(|message| message.id));
+        }
+        assert_eq!(ids, (1..=10).collect::<Vec<_>>());
     }
 }

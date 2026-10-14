@@ -43,6 +43,17 @@ async fn authenticate(connection: &Connection, key: &[u8]) -> (SendStream, RecvS
     (send, recv)
 }
 
+async fn open_unauthenticated_stream(connection: &Connection) -> (SendStream, RecvStream) {
+    let (send, mut recv) = connection.open_bi().await.unwrap().await.unwrap();
+    let challenge = read_bytes(&mut recv, 17).await;
+    assert_eq!(challenge[0], Opcode::AuthChallenge.as_u8());
+    for _ in 0..2 {
+        let len = u32::from_le_bytes(read_bytes(&mut recv, 4).await.try_into().unwrap());
+        read_bytes(&mut recv, len as usize).await;
+    }
+    (send, recv)
+}
+
 #[tokio::test]
 async fn live_pinned_quic_auth_heartbeat_relay_and_sync() {
     let directory = std::env::temp_dir().join(format!("impulse-live-test-{}-{:016x}", std::process::id(), rand::random::<u64>()));
@@ -78,6 +89,41 @@ async fn live_pinned_quic_auth_heartbeat_relay_and_sync() {
     let (mut send_b, mut recv_b) = authenticate(&second, &key).await;
     assert_eq!(tui.stats.sessions.load(Ordering::Relaxed), 2);
 
+    // Auth's 30-second deadline must stop applying after the transition to
+    // authenticated. Keep one real QUIC session active beyond that boundary.
+    let heartbeat_start = tokio::time::Instant::now();
+    while heartbeat_start.elapsed() < Duration::from_secs(31) {
+        let heartbeat = crate::protocol::encode_heartbeat(heartbeat_start.elapsed().as_millis() as u64);
+        send_a.write_all(&heartbeat).await.unwrap();
+        assert_eq!(read_bytes(&mut recv_a, heartbeat.len()).await, heartbeat);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+
+    // Valid framing with a pre-auth application opcode must close the session.
+    let unauthenticated = tokio::time::timeout(Duration::from_secs(5), endpoint.connect(url.as_str())).await.unwrap().unwrap();
+    let (mut unauth_send, mut unauth_recv) = open_unauthenticated_stream(&unauthenticated).await;
+    let mut forbidden = PacketWriter::with_opcode(Opcode::Data);
+    forbidden.write_len_prefixed(b"must not be accepted");
+    unauth_send.write_all(&forbidden.into_bytes()).await.unwrap();
+    let mut one = [0u8; 1];
+    let closed = tokio::time::timeout(Duration::from_secs(5), unauth_recv.read(&mut one)).await;
+    assert!(matches!(closed, Ok(Ok(None)) | Ok(Err(_))), "unauthenticated packet must close the session: {closed:?}");
+    unauthenticated.close(0u32.into(), b"fail-closed regression");
+
+    // Heartbeat is not an auth bypass and must not produce a pre-auth response.
+    let unauth_heartbeat = tokio::time::timeout(Duration::from_secs(5), endpoint.connect(url.as_str())).await.unwrap().unwrap();
+    let (mut heartbeat_send, mut heartbeat_recv) = open_unauthenticated_stream(&unauth_heartbeat).await;
+    heartbeat_send.write_all(&crate::protocol::encode_heartbeat(123)).await.unwrap();
+    let mut one = [0u8; 1];
+    let heartbeat_closed = tokio::time::timeout(Duration::from_secs(5), heartbeat_recv.read(&mut one)).await;
+    assert!(matches!(heartbeat_closed, Ok(Ok(None)) | Ok(Err(_))), "pre-auth Heartbeat must not keep the session alive: {heartbeat_closed:?}");
+    unauth_heartbeat.close(0u32.into(), b"pre-auth heartbeat regression");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while tui.stats.sessions.load(Ordering::Relaxed) != 2 {
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+
     let heartbeat = crate::protocol::encode_heartbeat(12345);
     send_a.write_all(&heartbeat).await.unwrap();
     assert_eq!(read_bytes(&mut recv_a, 9).await, heartbeat);
@@ -100,6 +146,47 @@ async fn live_pinned_quic_auth_heartbeat_relay_and_sync() {
     assert_eq!(u32::from_le_bytes(replay[1..5].try_into().unwrap()), 1);
     assert_eq!(u64::from_le_bytes(replay[5..13].try_into().unwrap()), id);
     assert_eq!(read_bytes(&mut recv_b, opaque.len()).await, opaque);
+
+    // Exercise the production Sync encoder/pager above one 4 MiB response.
+    // Five maximum-sized opaque payloads require at least two bounded frames.
+    let large_payload = vec![0x5A; crate::protocol::limits::MAX_PAYLOAD_BYTES];
+    for _ in 0..5 {
+        let mut data = PacketWriter::with_opcode(Opcode::Data);
+        data.write_len_prefixed(&large_payload);
+        send_a.write_all(&data.into_bytes()).await.unwrap();
+    }
+    for _ in 0..5 {
+        let header = read_bytes(&mut recv_b, 21).await;
+        assert_eq!(header[0], Opcode::Data.as_u8());
+        assert_eq!(u32::from_le_bytes(header[17..21].try_into().unwrap()) as usize, large_payload.len());
+        assert_eq!(read_bytes(&mut recv_b, large_payload.len()).await, large_payload);
+    }
+    let mut sync = PacketWriter::with_opcode(Opcode::Sync);
+    sync.write_u64(id);
+    send_b.write_all(&sync.into_bytes()).await.unwrap();
+    let mut synced = 0usize;
+    let mut frames = 0usize;
+    while synced < 5 {
+        let mut frame_bytes = 5usize;
+        let frame_header = read_bytes(&mut recv_b, 5).await;
+        assert_eq!(frame_header[0], Opcode::SyncResponse.as_u8());
+        let count = u32::from_le_bytes(frame_header[1..5].try_into().unwrap()) as usize;
+        assert!(count > 0 && count < 500);
+        for _ in 0..count {
+            let record = read_bytes(&mut recv_b, 20).await;
+            frame_bytes += 20;
+            let payload_len = u32::from_le_bytes(record[16..20].try_into().unwrap()) as usize;
+            frame_bytes += payload_len;
+            assert_eq!(payload_len, large_payload.len());
+            let payload = read_bytes(&mut recv_b, payload_len).await;
+            assert_eq!(payload, large_payload);
+        }
+        assert!(frame_bytes <= crate::protocol::limits::MAX_SYNC_RESPONSE_BYTES);
+        synced += count;
+        frames += 1;
+    }
+    assert!(frames >= 2, "more than 4 MiB of Sync data must be paged");
+
     first.close(0u32.into(), b"test complete");
     second.close(0u32.into(), b"test complete");
     endpoint.wait_idle().await;

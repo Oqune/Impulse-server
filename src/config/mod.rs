@@ -76,16 +76,7 @@ impl AppConfig {
                  or pass --password-hash <hash>, or set `server.password_hash` in config.toml"
             );
         }
-        let h = self.server.password_hash.trim();
-        if !h.starts_with("$argon2") {
-            // Use chars().take() to avoid panicking on multi-byte UTF-8 at byte boundary.
-            let preview: String = h.chars().take(32).collect();
-            anyhow::bail!(
-                "password_hash must be an Argon2id encoded string (starts with $argon2), \
-                 got: {}",
-                preview
-            );
-        }
+        crate::crypto::validate_auth_hash(self.server.password_hash.trim())?;
 
         // Validate primary bind address.
         if self.server.address.parse::<std::net::SocketAddr>().is_err() {
@@ -216,4 +207,35 @@ pub fn current_port(address: &str) -> u16 {
     after
         .and_then(|p| p.trim_start_matches(':').parse().ok())
         .unwrap_or(4433)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppConfig, ServerSettings};
+
+    const SUPPORTED_NONDEFAULT_HASH: &str = "$argon2id$v=19$m=49152,t=4,p=2$MDEyMzQ1Njc4OWFiY2RlZg$BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
+
+    #[test]
+    fn startup_validation_accepts_supported_nondefault_hash_parameters() {
+        let config = AppConfig {
+            server: ServerSettings {
+                password_hash: SUPPORTED_NONDEFAULT_HASH.to_string(),
+                ..ServerSettings::default()
+            },
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn startup_validation_rejects_unsupported_hash_without_echoing_it() {
+        let invalid_hash = "$argon2i$v=19$m=47104,t=3,p=1$MDEyMzQ1Njc4OWFiY2RlZg$BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
+        let config = AppConfig {
+            server: ServerSettings {
+                password_hash: invalid_hash.to_string(),
+                ..ServerSettings::default()
+            },
+        };
+        let error = config.validate().unwrap_err().to_string();
+        assert!(!error.contains(invalid_hash));
+    }
 }

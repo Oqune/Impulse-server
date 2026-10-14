@@ -17,9 +17,52 @@ use tracing::{debug, info, trace, warn};
 
 use crate::protocol::framing::{TryReadResult, try_read_packet};
 use crate::protocol::limits::{MAX_STREAM_BUFFER, MAX_TOTAL_BUFFERED_BYTES};
-use crate::protocol::encode_auth_challenge;
+use crate::protocol::encode_auth_challenge_with_params;
 use crate::relay::users::UserRegistry;
-use crate::relay::{NONCE_LEN, RelayServer, SESSION_IDLE_TIMEOUT, ServerStats, op_name};
+use crate::relay::{DirectResponse, HANDSHAKE_TIMEOUT, NONCE_LEN, NONCE_MAX_AGE, RelayServer, SESSION_IDLE_TIMEOUT, ServerStats, op_name};
+
+fn session_read_timeout(authenticated: bool, auth_deadline: Instant, now: Instant) -> std::time::Duration {
+    if authenticated {
+        SESSION_IDLE_TIMEOUT
+    } else {
+        auth_deadline.saturating_duration_since(now)
+    }
+}
+
+const SYNC_FRAME_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const SYNC_OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+enum DirectResponseWriteError {
+    Io(std::io::Error),
+    SyncTimeout,
+}
+
+async fn timeout_sync_operation<F: std::future::Future>(
+    timeout: std::time::Duration,
+    operation: F,
+) -> Result<F::Output, tokio::time::error::Elapsed> {
+    tokio::time::timeout(timeout, operation).await
+}
+
+async fn write_direct_response<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    response: &DirectResponse,
+    sync_timeout: std::time::Duration,
+) -> Result<(), DirectResponseWriteError> {
+    let write_and_flush = async {
+        writer.write_all(&response.packet).await?;
+        writer.flush().await
+    };
+    let result = if response.is_sync() {
+        match tokio::time::timeout(sync_timeout, write_and_flush).await {
+            Ok(result) => result,
+            Err(_) => return Err(DirectResponseWriteError::SyncTimeout),
+        }
+    } else {
+        write_and_flush.await
+    };
+    result.map_err(DirectResponseWriteError::Io)
+}
 
 /// Lightweight snapshot of a live session, stored in the relay's session
 /// registry and displayed by the TUI.
@@ -125,11 +168,16 @@ impl RelayServer {
         // so the two endpoints ended up on different streams and no data flowed
         // in either direction (session handshake succeeded, but auth/relay never
         // worked).
-        let (mut send_stream, recv_stream) = match connection.accept_bi().await {
-            Ok(pair) => pair,
-            Err(e) => {
+        let (mut send_stream, recv_stream) = match tokio::time::timeout(HANDSHAKE_TIMEOUT, connection.accept_bi()).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => {
                 warn!("[STREAM] Session {} accept_bi FAILED: {}", session_key, e);
                 connection.close(wtransport::VarInt::from(0u32), b"stream");
+                return;
+            }
+            Err(_) => {
+                warn!("[STREAM] Session {} timed out waiting for client bidirectional stream", session_key);
+                connection.close(wtransport::VarInt::from(0u32), b"stream_timeout");
                 return;
             }
         };
@@ -138,41 +186,47 @@ impl RelayServer {
         let nonce: Vec<u8> = (0..NONCE_LEN)
             .map(|_| rand::random::<u8>())
             .collect();
+        let challenge_created_at = Instant::now();
+        let auth_deadline = challenge_created_at + NONCE_MAX_AGE;
         self.auth_nonces
-            .insert(session_key, (nonce.clone(), Instant::now()));
+            .insert(session_key, (nonce.clone(), challenge_created_at));
         self.auth_attempts
             .insert(session_key, AtomicU32::new(0));
 
-        // Extract B64 salt from stored Argon2 hash for the challenge
-        let argon2_salt_b64 = {
-            use argon2::password_hash::PasswordHash;
-            match PasswordHash::new(&self.password_hash) {
-                Ok(parsed) => parsed.salt.map(|s| s.to_string()).unwrap_or_default(),
-                Err(_) => String::new(),
-            }
-        };
-
         // Send challenge: [0x0B] + 16 raw nonce bytes + len-prefixed B64 salt.
-        if let Err(e) = send_stream
-            .write_all(&encode_auth_challenge(&nonce, &argon2_salt_b64))
-            .await
-        {
-            warn!("[STREAM] Session {} failed to send challenge: {}", session_key, e);
-            // Clean up auth entries to prevent memory leak
-            self.auth_nonces.remove(&session_key);
-            self.auth_attempts.remove(&session_key);
-            connection.close(wtransport::VarInt::from(0u32), b"challenge");
-            return;
-        }
-        if let Err(e) = send_stream.flush().await {
-            warn!("[STREAM] Session {} failed to flush challenge: {}", session_key, e);
-            self.auth_nonces.remove(&session_key);
-            self.auth_attempts.remove(&session_key);
-            connection.close(wtransport::VarInt::from(0u32), b"flush");
-            return;
+        let challenge = encode_auth_challenge_with_params(
+            &nonce,
+            &self.auth_hash_params.salt_b64,
+            self.auth_hash_params.memory_kib,
+            self.auth_hash_params.iterations,
+            self.auth_hash_params.parallelism,
+        );
+        let challenge_result = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(auth_deadline),
+            async {
+                send_stream.write_all(&challenge).await.map_err(|e| e.to_string())?;
+                send_stream.flush().await.map_err(|e| e.to_string())
+            },
+        ).await;
+        match challenge_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                warn!("[STREAM] Session {} failed to send auth challenge: {}", session_key, e);
+                self.auth_nonces.remove(&session_key);
+                self.auth_attempts.remove(&session_key);
+                connection.close(wtransport::VarInt::from(0u32), b"challenge");
+                return;
+            }
+            Err(_) => {
+                warn!("[AUTH] Session {} auth challenge write exceeded its deadline", session_key);
+                self.auth_nonces.remove(&session_key);
+                self.auth_attempts.remove(&session_key);
+                connection.close(wtransport::VarInt::from(0u32), b"challenge_timeout");
+                return;
+            }
         }
 
-        self.run_session(session_key, remote_ip, recv_stream, send_stream, _permit)
+        self.run_session(session_key, remote_ip, recv_stream, send_stream, auth_deadline, _permit)
             .await;
     }
 
@@ -186,6 +240,7 @@ impl RelayServer {
         remote_ip: std::net::IpAddr,
         mut reader: R,
         mut writer: W,
+        auth_deadline: Instant,
         _permit: tokio::sync::OwnedSemaphorePermit,
     ) where
         R: AsyncReadExt + Unpin + Send + 'static,
@@ -197,7 +252,7 @@ impl RelayServer {
         let mut keyexchange_sub = self.keyexchange_tx.subscribe();
 
         // Channel for direct responses (SyncResponse, Heartbeat, AuthResult)
-        let (direct_tx, mut direct_rx) = mpsc::channel::<Vec<u8>>(32);
+        let (direct_tx, mut direct_rx) = mpsc::channel::<DirectResponse>(1);
 
         // Register this session in the live-session registry (TUI session table).
         let meta = SessionMeta {
@@ -294,18 +349,25 @@ impl RelayServer {
                             Err(_) => break,
                         }
                     }
-                    Some(packet) = direct_rx.recv() => {
+                    Some(response) = direct_rx.recv() => {
+                        let packet = &response.packet;
                         let op = if packet.is_empty() { 0 } else { packet[0] };
                         debug!("[WRITER] Session {} <- DIRECT opcode=0x{:02x} ({}) len={}",
                             session_key, op, op_name(op), packet.len());
-                        if let Err(e) = writer.write_all(&packet).await {
-                            warn!("[WRITER] Session {} direct write error: {}", session_key, e);
-                            break;
+                        match write_direct_response(&mut writer, &response, SYNC_FRAME_WRITE_TIMEOUT).await {
+                            Ok(()) => {}
+                            Err(DirectResponseWriteError::Io(e)) => {
+                                warn!("[WRITER] Session {} direct write/flush error: {}", session_key, e);
+                                break;
+                            }
+                            Err(DirectResponseWriteError::SyncTimeout) => {
+                                warn!("[WRITER] Session {} SyncResponse write/flush exceeded {}s; closing stalled session",
+                                    session_key, SYNC_FRAME_WRITE_TIMEOUT.as_secs());
+                                break;
+                            }
                         }
-                        if let Err(e) = writer.flush().await {
-                            warn!("[WRITER] Session {} direct flush error: {}", session_key, e);
-                            break;
-                        }
+                        // `response` drops here; Sync frame budget is released
+                        // only after the bytes have left the writer buffer.
                     }
                     else => {
                         info!("[WRITER] Session {} all channels closed, stopping", session_key);
@@ -326,9 +388,9 @@ impl RelayServer {
                 let mut buf = BudgetedBuffer::new(&this.stats.buffered_bytes);
                 let mut chunk = [0u8; 8192];
 
-                loop {
-                    let read =
-                        tokio::time::timeout(SESSION_IDLE_TIMEOUT, reader.read(&mut chunk)).await;
+                'read: loop {
+                    let read_timeout = session_read_timeout(session.authenticated, auth_deadline, Instant::now());
+                    let read = tokio::time::timeout(read_timeout, reader.read(&mut chunk)).await;
                     match read {
                         Ok(Ok(0)) => {
                             break; // EOF
@@ -401,19 +463,47 @@ impl RelayServer {
                                             op_name(op),
                                             packet_len
                                         );
-                                        if let Err(e) = crate::relay::auth::process_packet(
-                                            &this,
-                                            &mut session,
-                                            &direct_tx,
-                                            &packet_data,
-                                        )
-                                        .await
-                                        {
+                                        let was_authenticated = session.authenticated;
+                                        let is_sync = packet_data.first() == Some(&crate::protocol::Opcode::Sync.as_u8());
+                                        let process = crate::relay::auth::process_packet(
+                                            &this, &mut session, &direct_tx, &packet_data,
+                                        );
+                                        let packet_result = if was_authenticated && is_sync {
+                                            match timeout_sync_operation(SYNC_OPERATION_TIMEOUT, process).await {
+                                                Ok(result) => result,
+                                                Err(_) => {
+                                                    warn!("[SYNC] Session {} Sync operation exceeded {}s (including admission/backpressure); closing so it can resume after reconnect",
+                                                        session_key, SYNC_OPERATION_TIMEOUT.as_secs());
+                                                    break 'read;
+                                                }
+                                            }
+                                        } else if was_authenticated {
+                                            process.await
+                                        } else {
+                                            match tokio::time::timeout_at(
+                                                tokio::time::Instant::from_std(auth_deadline),
+                                                process,
+                                            ).await {
+                                                Ok(result) => result,
+                                                Err(_) => {
+                                                    warn!("[AUTH] Session {} authentication deadline expired while processing packet", session_key);
+                                                    break 'read;
+                                                }
+                                            }
+                                        };
+                                        if let Err(e) = packet_result {
                                             info!(
                                                 "[READER] Session {} packet error: {} (authenticated={})",
                                                 session_key, e, session.authenticated
                                             );
-                                            break;
+                                            break 'read;
+                                        }
+                                        if !was_authenticated
+                                            && session.authenticated
+                                            && Instant::now() >= auth_deadline
+                                        {
+                                            warn!("[AUTH] Session {} authentication completed after deadline", session_key);
+                                            break 'read;
                                         }
                                     }
                                     TryReadResult::Incomplete => {
@@ -458,11 +548,11 @@ impl RelayServer {
                             break;
                         }
                         Err(_) => {
-                            warn!(
-                                "[READER] Session {} IDLE TIMEOUT ({}s, no data from client)",
-                                session_key,
-                                SESSION_IDLE_TIMEOUT.as_secs()
-                            );
+                            if session.authenticated {
+                                warn!("[READER] Session {} IDLE TIMEOUT ({}s, no data from client)", session_key, SESSION_IDLE_TIMEOUT.as_secs());
+                            } else {
+                                warn!("[AUTH] Session {} authentication deadline expired", session_key);
+                            }
                             break;
                         }
                     }
@@ -507,7 +597,7 @@ fn cleanup_session_state(
     users: &UserRegistry,
     auth_nonces: &DashMap<u64, (Vec<u8>, Instant)>,
     auth_attempts: &DashMap<u64, AtomicU32>,
-    key_exchange_store: &DashMap<u64, Vec<Vec<u8>>>,
+    key_exchange_store: &crate::relay::KeyExchangeStore,
     session_key: u64,
 ) {
     if let Some((_, meta)) = sessions.remove(&session_key)
@@ -518,13 +608,17 @@ fn cleanup_session_state(
     stats.drop_session();
     auth_nonces.remove(&session_key);
     auth_attempts.remove(&session_key);
-    key_exchange_store.remove(&session_key);
+    key_exchange_store.remove(session_key);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BudgetedBuffer, SessionMeta, cleanup_session_state};
+    use super::{
+        BudgetedBuffer, DirectResponse, DirectResponseWriteError, SessionMeta, cleanup_session_state,
+        session_read_timeout, timeout_sync_operation, write_direct_response,
+    };
     use crate::relay::ServerStats;
+    use crate::relay::KeyExchangeStore;
     use crate::relay::users::UserRegistry;
     use dashmap::DashMap;
     use std::net::IpAddr;
@@ -543,6 +637,54 @@ mod tests {
         assert!(!m.authenticated);
         m.authenticated = true;
         assert!(m.authenticated);
+    }
+
+    #[test]
+    fn unauthenticated_read_timeout_is_absolute_and_auth_restores_idle_timeout() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(30);
+        assert_eq!(session_read_timeout(false, deadline, start), Duration::from_secs(30));
+        assert_eq!(
+            session_read_timeout(false, deadline, start + Duration::from_secs(25)),
+            Duration::from_secs(5),
+            "traffic cannot extend the original authentication deadline"
+        );
+        assert_eq!(
+            session_read_timeout(false, deadline, deadline + Duration::from_secs(1)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            session_read_timeout(true, deadline, deadline + Duration::from_secs(1)),
+            super::SESSION_IDLE_TIMEOUT
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_sync_writer_times_out_and_returns_frame_budget_on_drop() {
+        let budget = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = budget.clone().acquire_owned().await.unwrap();
+        let response = DirectResponse::sync(vec![0x34; 1024], permit);
+        let (mut writer, _reader) = tokio::io::duplex(1);
+        assert!(matches!(
+            write_direct_response(&mut writer, &response, Duration::from_millis(10)).await,
+            Err(DirectResponseWriteError::SyncTimeout)
+        ));
+        assert_eq!(budget.available_permits(), 0, "response keeps its budget until dropped");
+        drop(response);
+        assert_eq!(budget.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn sync_operation_deadline_bounds_waiting_for_admission() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = permits.clone().acquire_owned().await.unwrap();
+        let result = timeout_sync_operation(
+            Duration::from_millis(10),
+            permits.clone().acquire_owned(),
+        ).await;
+        assert!(result.is_err(), "a Sync waiting for admission must hit its operation deadline");
+        drop(held);
+        assert_eq!(permits.available_permits(), 1);
     }
 
     #[test]
@@ -601,7 +743,8 @@ mod tests {
         let users = UserRegistry::new();
         let auth_nonces = DashMap::new();
         let auth_attempts = DashMap::new();
-        let key_exchange_store = DashMap::new();
+        let key_exchange_store = KeyExchangeStore::default();
+        key_exchange_store.insert(7, vec![1, 2, 3]);
 
         // Session connects: registry entry + counter bump (as run_session does).
         sessions.insert(
@@ -630,6 +773,7 @@ mod tests {
         );
         assert_eq!(sessions.len(), 0);
         assert_eq!(stats.sessions.load(Ordering::Relaxed), 0);
+        assert!(key_exchange_store.packets_for(7).is_empty());
     }
 
     #[test]
@@ -639,7 +783,7 @@ mod tests {
         let stats = ServerStats::new();
         let auth_nonces = DashMap::new();
         let auth_attempts = DashMap::new();
-        let key_exchange_store = DashMap::new();
+        let key_exchange_store = KeyExchangeStore::default();
 
         // Session connects, authenticates, and binds to user "deadbeef" (as
         // the 0x0C handler does via bind_session).
@@ -684,7 +828,7 @@ mod tests {
         let stats = ServerStats::new();
         let auth_nonces = DashMap::new();
         let auth_attempts = DashMap::new();
-        let key_exchange_store = DashMap::new();
+        let key_exchange_store = KeyExchangeStore::default();
 
         let fp = "deadbeefcafebabe0123456789abcdef".to_string();
         users.bind_session(&fp);

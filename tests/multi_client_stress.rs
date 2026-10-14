@@ -1,14 +1,13 @@
-//! MULTI-CLIENT STRESS TESTS — automatic verification that many concurrent
-//! connections behave correctly (no message leakage between recipients, no
-//! lost messages, no id collision, correct per-recipient routing).
+//! MULTI-CLIENT STORAGE-LEVEL TESTS — deterministic checks for auth helper
+//! behavior, opaque payload retention, and monotonic storage ids.
 //!
-//! These run at the packet/storage level (no live WebTransport) so they execute
-//! fast and deterministically in CI. They complement the manual e2e flow and
-//! guard the "many connections" correctness property you asked to automate.
+//! These do not exercise server-side routing, recipient isolation, concurrent
+//! WebTransport sessions, or delivery. See `ui::live_tests` for the smaller
+//! production-path loopback relay smoke test.
 
 mod common;
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use impulse_server::crypto::argon2_hash;
 use impulse_server::protocol::{Opcode, PacketReader, PacketWriter, encode_sync_response};
@@ -39,11 +38,11 @@ fn build_per_recipient_blob(
     w.into_bytes()
 }
 
-/// Simulate N authenticated clients exchanging per-recipient messages and
-/// verify that each recipient receives EXACTLY the messages addressed to it
-/// and NOT messages addressed to others.
+/// Exercise auth helper calculations and independent opaque storage entries.
+/// This does not test whether recipients receive only their addressed frames;
+/// the server deliberately does not parse recipient metadata in ciphertext.
 #[test]
-fn many_clients_per_recipient_isolation() {
+fn many_client_auth_and_opaque_payload_storage() {
     const N: usize = 8;
     let password = "stress_password";
     let stored_hash = argon2_hash(password).unwrap();
@@ -66,36 +65,28 @@ fn many_clients_per_recipient_isolation() {
     let recipients: Vec<Vec<u8>> = (0..N).map(|i| format!("user-{i:02}").into_bytes()).collect();
 
     let store = MessageStore::new();
-    // Client 0 sends a private message to EACH other client individually.
+    // Model distinct client-generated opaque payloads. Storage does not parse
+    // recipient IDs and this test makes no routing or confidentiality claim.
     for i in 1..N {
         let ct = format!("secret-from-0-to-{i}").into_bytes();
         let blob = build_per_recipient_blob(
             &recipients[0],
             &[(&recipients[i], b"enckey", &ct)],
         );
-        let _frame = blob; // client would send this; server stores the ciphertext
-        store.push(ct.clone());
+        assert!(blob.windows(ct.len()).any(|window| window == ct));
+        store.push(blob);
     }
 
-    // Each recipient i (1..N) syncs and must see ONLY its own message.
-    // (In the real relay, per-recipient routing happens server-side; here we
-    //  assert the storage layer holds exactly N-1 distinct private messages and
-    //  none is a broadcast to all.)
+    // The storage layer retains N-1 distinct opaque payloads. This says nothing
+    // about what any live recipient receives.
     let all = store.since(0, 10_000);
-    assert_eq!(all.len(), N - 1, "exactly N-1 private messages stored");
+    assert_eq!(all.len(), N - 1, "exactly N-1 opaque payloads stored");
 
-    // No message addressed to user-0 should exist (0 only SENT).
-    let leak = all
-        .iter()
-        .any(|m| String::from_utf8_lossy(&m.payload).contains("secret-from-0-to-0"));
-    assert!(!leak, "sender must not receive its own outbound private message");
-
-    // Every recipient id 1..N has a distinct, non-empty ciphertext.
-    let mut seen = HashMap::new();
+    // Every modeled payload is non-empty and distinct in storage.
+    let mut seen = HashSet::new();
     for m in &all {
-        let s = String::from_utf8_lossy(&m.payload).to_string();
-        assert!(!s.is_empty());
-        assert!(seen.insert(s.clone(), true).is_none(), "duplicate ciphertext stored");
+        assert!(!m.payload.is_empty());
+        assert!(seen.insert(m.payload.clone()), "duplicate opaque payload stored");
     }
 }
 
