@@ -1,7 +1,8 @@
 [package]
 name = "impulse-server"
-version = "3.1.0"
+version = "3.1.1"
 edition = "2024"
+rust-version = "1.88"
 description = "Secure ephemeral messenger server over WebTransport (QUIC) with TOFU trust-on-first-use"
 license = "MIT"
 authors = ["oqune"]
@@ -108,7 +109,7 @@ name = "impulse-server"
 license = "MIT"
 summary = "Secure ephemeral messenger server over WebTransport"
 description = "Impulse Server - secure ephemeral messenger server over WebTransport (QUIC) with TOFU trust-on-first-use"
-version = "2.7.4"
+version = "3.1.1"
 assets = [
     { source = "target/release/impulse-server", dest = "/usr/bin/impulse-server", mode = "755" },
     { source = "packaging/config.toml", dest = "/etc/impulse-server/config.toml", mode = "644" },
