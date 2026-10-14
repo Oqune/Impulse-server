@@ -61,3 +61,7 @@ Release notes are separate bilingual files with architecture and direct-link tab
 ## Final compatibility and scope
 
 Tested pair: Client3.2.1 / Server3.1.1, API36 x86_64 and Windows amd64. Other Protocol v3 release pairs were not tested and are not inferred from their major version. Final Android gate152 passed/0 failed/0 skipped,16 database/certificate device tests passed, real negative and15.154s setup deadline checks passed. The two >20-minute runners completed normally. These results establish the stated local demonstration scope; they do not establish universal production readiness.
+
+## Final authenticated-handler guard verification
+
+Root independently repeated locked build, all tests (141 PASS, 2 deliberately ignored), all-target clippy and release after commit c552d85. Every authenticated packet handler now has a per-operation 30-second deadline, including a full direct-response queue; it is not a session lifetime limit. The real QUIC regression checks the blocked heartbeat queue and normal traffic beyond the auth deadline. Final rebuilt Windows relay passed both API36 client runners again: 100 unique group messages and ordered persisted history, DM and offline/reconnect, in 15.186s/14.788s (`live-accepted-sender.log`, `live-accepted-receiver.log`). The >20-minute soak predates this last bounded-handler guard; the final guard has fresh local gates and paired runtime coverage, not a second 20-minute soak.

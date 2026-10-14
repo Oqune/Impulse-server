@@ -20,3 +20,5 @@ All changes preserve Wire v3 opcodes/layout and cryptographic minimums. No sourc
 | Documentation / release | Actual architecture/privacy/KDF/versions in instructions and registry; reviewed bilingual notes and draft workflow; signed-asset-only release job | project-docs-alignment and audit-patch-release; root mirror/hash/diff and published asset review |
 
 Project-local skills were searched for and none found. Global personal skills were not edited. Original school DOCX/video hash preservation and a separate school report document discrepancies without silently rewriting submitted material. No personal video, passwords, PHC from local configuration, keystore, certificate key or local test logs are committed.
+
+- c552d85: bound every authenticated relay packet operation to30s, including backpressured heartbeat response; independent locked gates and rebuilt paired emulator runtime PASS. Existing20min soak precedes this final guard.
